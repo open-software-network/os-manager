@@ -52,10 +52,8 @@ export async function runTriageSession(options: RunTriageOptions): Promise<Sessi
     system: TRIAGE_SYSTEM_PROMPT,
     prompt: buildTriagePrompt(options.issue, options.config.policies.triage_prompt),
     cwd: options.cwd,
-    maxSteps: 15,
     budgetUsd: options.config.budgets.per_task_usd,
-    verdictSchema: triageVerdictSchema,
-    config: options.config
+    verdictSchema: triageVerdictSchema
   });
 }
 

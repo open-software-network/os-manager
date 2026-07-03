@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BudgetStore, utcDay } from "../src/engine/budget.js";
+import { recordSessionSpend } from "../src/commands/budget.js";
 
 let dir: string;
 
@@ -34,5 +35,25 @@ describe("BudgetStore", () => {
     const store = new BudgetStore(join(dir, "budget.json"));
     expect(await store.markBudgetCommented("issue:1")).toBe(true);
     expect(await store.markBudgetCommented("issue:1")).toBe(false);
+  });
+
+  it("records fallback spend when CLI usage does not report exact cost", async () => {
+    const ctx = {
+      repo: { owner: "o", repo: "r" },
+      config: { budgets: { per_task_usd: 7 } }
+    };
+    const originalHome = process.env.HOME;
+    process.env.HOME = dir;
+    try {
+      await recordSessionSpend(ctx as never, { costUsd: 0 });
+      const store = BudgetStore.forRepo({ owner: "o", repo: "r" });
+      expect((await store.read()).spentUsd).toBe(7);
+    } finally {
+      if (originalHome === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = originalHome;
+      }
+    }
   });
 });

@@ -3,17 +3,17 @@ manager:
 
 models:
   triage:
-    provider: openai
-    model: gpt-5
+    provider: claude-code
+    model: fable
   plan:
-    provider: openai
-    model: gpt-5
+    provider: claude-code
+    model: fable
   review:
-    provider: openai
-    model: gpt-5-mini
+    provider: claude-code
+    model: sonnet
   meta_review:
-    provider: openai
-    model: gpt-5
+    provider: claude-code
+    model: fable
 
 poll:
   interval_seconds: 60

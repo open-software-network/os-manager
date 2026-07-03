@@ -3,11 +3,15 @@ import { join } from "node:path";
 import YAML from "yaml";
 import { z } from "zod";
 
-export const providerSchema = z.enum(["anthropic", "openai"]);
+export const providerSchema = z.enum(["claude-code", "codex-cli"]);
 
 export const modelRefSchema = z.object({
   provider: providerSchema,
-  model: z.string().min(1)
+  model: z.string().min(1).optional(),
+  command: z.string().min(1).optional(),
+  args: z.array(z.string()).default([]),
+  tools: z.array(z.string()).optional(),
+  timeout_seconds: z.number().int().positive().default(900)
 });
 
 export type ProviderName = z.infer<typeof providerSchema>;
@@ -66,16 +70,7 @@ export const configSchema = z.object({
     .object({
       prefix: z.string().min(1).default("osm")
     })
-    .default({ prefix: "osm" }),
-  prices: z
-    .record(
-      z.string(),
-      z.object({
-        inputUsdPerMTok: z.number().nonnegative(),
-        outputUsdPerMTok: z.number().nonnegative()
-      })
-    )
-    .default({})
+    .default({ prefix: "osm" })
 });
 
 export type OsManagerConfig = z.infer<typeof configSchema>;

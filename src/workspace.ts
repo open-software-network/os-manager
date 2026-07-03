@@ -46,7 +46,7 @@ export async function ensureRepoClone(repo: RepoRef, options: WorkspaceOptions =
 export async function ensurePullRequestWorktree(repo: RepoRef, prNumber: number, headSha: string, options: WorkspaceOptions = {}): Promise<string> {
   const clone = await ensureRepoClone(repo, options);
   const worktree = prWorktreePath(repo, prNumber, options.root);
-  await execFileAsync("git", ["-C", clone, "fetch", "origin", `pull/${prNumber}/head:refs/os-manager/pr-${prNumber}`], {
+  await execFileAsync("git", ["-C", clone, "fetch", "origin", `+pull/${prNumber}/head:refs/os-manager/pr-${prNumber}`], {
     maxBuffer: 1024 * 1024
   });
   try {

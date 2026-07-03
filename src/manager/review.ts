@@ -79,10 +79,8 @@ export async function runReviewerPassSession(options: RunReviewerPassOptions): P
     system: REVIEW_SYSTEM_PROMPT,
     prompt: buildReviewPrompt(options),
     cwd: options.cwd,
-    maxSteps: 60,
     budgetUsd: options.config.budgets.per_task_usd,
-    verdictSchema: reviewVerdictSchema,
-    config: options.config
+    verdictSchema: reviewVerdictSchema
   });
 }
 

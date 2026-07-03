@@ -42,10 +42,8 @@ export async function runPlanSession(options: RunPlanOptions): Promise<SessionRe
     system: PLAN_SYSTEM_PROMPT,
     prompt: buildPlanPrompt(options.issue),
     cwd: options.cwd,
-    maxSteps: 40,
     budgetUsd: options.config.budgets.per_task_usd,
-    verdictSchema: planVerdictSchema,
-    config: options.config
+    verdictSchema: planVerdictSchema
   });
 }
 

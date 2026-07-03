@@ -5,18 +5,17 @@ import type { OsManagerConfig } from "../src/config.js";
 const config: OsManagerConfig = {
   manager: { login: "bot" },
   models: {
-    triage: { provider: "anthropic", model: "claude-fable-5" },
-    plan: { provider: "anthropic", model: "claude-fable-5" },
-    review: { provider: "anthropic", model: "claude-sonnet-5" },
-    meta_review: { provider: "anthropic", model: "claude-fable-5" }
+    triage: { provider: "claude-code", model: "fable", args: [], timeout_seconds: 900 },
+    plan: { provider: "claude-code", model: "fable", args: [], timeout_seconds: 900 },
+    review: { provider: "claude-code", model: "sonnet", args: [], timeout_seconds: 900 },
+    meta_review: { provider: "claude-code", model: "fable", args: [], timeout_seconds: 900 }
   },
   poll: { interval_seconds: 60 },
   policies: { triage_prompt: "", max_review_rounds: 3, max_meta_rounds: 2, stale_after_hours: 48 },
   budgets: { per_task_usd: 5, daily_usd: 100 },
   merge: { method: "squash", auto_merge_on_approve: true },
   escalation: { mention: [] },
-  labels: { prefix: "osm" },
-  prices: {}
+  labels: { prefix: "osm" }
 };
 
 describe("work discovery", () => {

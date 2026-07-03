@@ -35,9 +35,15 @@ export async function ensureDailyBudget(
   return false;
 }
 
-export async function recordSessionSpend(ctx: CommandContext, usage: Pick<SessionUsage, "costUsd">, dryRun = false): Promise<void> {
-  if (dryRun || usage.costUsd <= 0) {
+export async function recordSessionSpend(
+  ctx: CommandContext,
+  usage: Pick<SessionUsage, "costUsd">,
+  dryRun = false,
+  fallbackUsd = ctx.config.budgets.per_task_usd
+): Promise<void> {
+  const amount = usage.costUsd > 0 ? usage.costUsd : fallbackUsd;
+  if (dryRun || amount <= 0) {
     return;
   }
-  await BudgetStore.forRepo(ctx.repo).recordSpend(usage.costUsd);
+  await BudgetStore.forRepo(ctx.repo).recordSpend(amount);
 }

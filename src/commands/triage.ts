@@ -50,7 +50,7 @@ export async function triageIssue(options: { repo: string; issue: number; config
     modelRef: ctx.config.models.triage,
     config: ctx.config
   });
-  await recordSessionSpend(ctx, session.usage);
+  await recordSessionSpend(ctx, session.usage, options.dryRun);
   const verdict = session.verdict;
 
   await postMarkedComment(

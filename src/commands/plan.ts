@@ -39,7 +39,7 @@ export async function planIssue(options: { repo: string; issue: number; config?:
     modelRef: ctx.config.models.plan,
     config: ctx.config
   });
-  await recordSessionSpend(ctx, session.usage);
+  await recordSessionSpend(ctx, session.usage, options.dryRun);
   const verdict = session.verdict;
   const body = makeMarker(
     "plan",

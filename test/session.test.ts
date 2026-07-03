@@ -1,8 +1,11 @@
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { extractFinalJson, runSession, SessionBudgetExceededError } from "../src/llm/session.js";
+import { extractFinalJson, runSession, testOnly } from "../src/llm/session.js";
 
-const modelRef = { provider: "anthropic" as const, model: "claude-sonnet-5" };
+const modelRef = { provider: "claude-code" as const, model: "sonnet", args: [], timeout_seconds: 900 };
 const schema = z.object({ verdict: z.literal("approve") });
 
 describe("LLM session", () => {
@@ -18,7 +21,6 @@ describe("LLM session", () => {
       system: "system",
       prompt: "prompt",
       cwd: process.cwd(),
-      maxSteps: 1,
       budgetUsd: 1,
       verdictSchema: schema,
       generate: async () => {
@@ -32,7 +34,7 @@ describe("LLM session", () => {
     expect(result.verdict.verdict).toBe("approve");
   });
 
-  it("passes a stop condition instead of the removed maxSteps option", async () => {
+  it("passes CLI runner metadata to mocked generation", async () => {
     let args: Record<string, unknown> | undefined;
     await runSession({
       role: "triage",
@@ -40,7 +42,6 @@ describe("LLM session", () => {
       system: "system",
       prompt: "prompt",
       cwd: process.cwd(),
-      maxSteps: 3,
       budgetUsd: 1,
       verdictSchema: schema,
       generate: async (received) => {
@@ -52,26 +53,84 @@ describe("LLM session", () => {
       }
     });
 
-    expect(args).not.toHaveProperty("maxSteps");
-    expect(args).toHaveProperty("stopWhen");
+    expect(args?.runner).toMatchObject({ provider: "claude-code", model: "sonnet" });
   });
 
-  it("aborts when calculated cost exceeds budget", async () => {
-    await expect(
-      runSession({
+  it("does not infer API spend from token counts for CLI runners", async () => {
+    const result = await runSession({
+      role: "triage",
+      modelRef,
+      system: "system",
+      prompt: "prompt",
+      cwd: process.cwd(),
+      budgetUsd: 0.000001,
+      verdictSchema: schema,
+      generate: async () => ({
+        text: "ok\n```json\n{\"verdict\":\"approve\"}\n```",
+        usage: { inputTokens: 10_000, outputTokens: 10_000 }
+      })
+    });
+
+    expect(result.usage.costUsd).toBe(0);
+  });
+
+  it("strips GitHub and provider tokens from runner subprocess env", () => {
+    const previous = {
+      OSM_GITHUB_TOKEN: process.env.OSM_GITHUB_TOKEN,
+      GH_TOKEN: process.env.GH_TOKEN,
+      GITHUB_TOKEN: process.env.GITHUB_TOKEN,
+      ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY,
+      OPENAI_API_KEY: process.env.OPENAI_API_KEY
+    };
+    try {
+      process.env.OSM_GITHUB_TOKEN = "secret";
+      process.env.GH_TOKEN = "secret";
+      process.env.GITHUB_TOKEN = "secret";
+      process.env.ANTHROPIC_API_KEY = "secret";
+      process.env.OPENAI_API_KEY = "secret";
+
+      const env = testOnly.runnerEnv();
+
+      expect(env.OSM_GITHUB_TOKEN).toBeUndefined();
+      expect(env.GH_TOKEN).toBeUndefined();
+      expect(env.GITHUB_TOKEN).toBeUndefined();
+      expect(env.ANTHROPIC_API_KEY).toBeUndefined();
+      expect(env.OPENAI_API_KEY).toBeUndefined();
+    } finally {
+      for (const [key, value] of Object.entries(previous)) {
+        if (value === undefined) {
+          delete process.env[key];
+        } else {
+          process.env[key] = value;
+        }
+      }
+    }
+  });
+
+  it("runs through the real spawn-based CLI path", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "os-manager-session-"));
+    const script = join(dir, "fake-runner.sh");
+    await writeFile(
+      script,
+      "#!/bin/sh\ncat >/dev/null\nprintf 'ok\\n```json\\n{\"verdict\":\"approve\"}\\n```\\n'\n",
+      "utf8"
+    );
+    await chmod(script, 0o755);
+    try {
+      const result = await runSession({
         role: "triage",
-        modelRef,
+        modelRef: { provider: "claude-code", command: script, args: [], timeout_seconds: 30 },
         system: "system",
         prompt: "prompt",
         cwd: process.cwd(),
-        maxSteps: 1,
-        budgetUsd: 0.000001,
-        verdictSchema: schema,
-        generate: async () => ({
-          text: "ok\n```json\n{\"verdict\":\"approve\"}\n```",
-          usage: { inputTokens: 10_000, outputTokens: 10_000 }
-        })
-      })
-    ).rejects.toBeInstanceOf(SessionBudgetExceededError);
+        budgetUsd: 1,
+        verdictSchema: schema
+      });
+
+      expect(result.verdict.verdict).toBe("approve");
+      expect(result.rawText).toContain("```json");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

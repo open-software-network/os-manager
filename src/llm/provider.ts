@@ -1,45 +1,81 @@
-import { anthropic } from "@ai-sdk/anthropic";
-import { openai } from "@ai-sdk/openai";
-import type { ModelRef, OsManagerConfig } from "../config.js";
+import { access } from "node:fs/promises";
+import { delimiter, isAbsolute, join } from "node:path";
+import type { ModelRef } from "../config.js";
 
-export interface Price {
-  inputUsdPerMTok: number;
-  outputUsdPerMTok: number;
+export interface CliInvocation {
+  command: string;
+  args: string[];
+  input: string;
+  timeoutMs: number;
 }
 
-export const PRICE_TABLE: Record<string, Price> = {
-  "claude-fable-5": { inputUsdPerMTok: 15, outputUsdPerMTok: 75 },
-  "claude-sonnet-5": { inputUsdPerMTok: 3, outputUsdPerMTok: 15 },
-  "gpt-5": { inputUsdPerMTok: 1.25, outputUsdPerMTok: 10 },
-  "gpt-5-mini": { inputUsdPerMTok: 0.25, outputUsdPerMTok: 2 },
-  "gpt-5-nano": { inputUsdPerMTok: 0.05, outputUsdPerMTok: 0.4 },
-  "gpt-5.6-sol": { inputUsdPerMTok: 15, outputUsdPerMTok: 75 },
-  "gpt-5.1": { inputUsdPerMTok: 1.25, outputUsdPerMTok: 10 }
-};
+export function runnerCommand(ref: ModelRef): string {
+  if (ref.command) {
+    return ref.command;
+  }
+  return ref.provider === "claude-code" ? "claude" : "codex";
+}
 
-export type LanguageModelLike = unknown;
-
-export function resolveModel(ref: ModelRef): LanguageModelLike {
-  switch (ref.provider) {
-    case "anthropic":
-      return anthropic(ref.model);
-    case "openai":
-      return openai(ref.model);
-    default: {
-      const exhaustive: never = ref.provider;
-      throw new Error(`Unsupported provider: ${exhaustive}`);
+export async function resolveExecutable(command: string): Promise<string | undefined> {
+  if (isAbsolute(command)) {
+    try {
+      await access(command);
+      return command;
+    } catch {
+      return undefined;
     }
   }
-}
-
-export function priceForModel(ref: ModelRef, config?: Pick<OsManagerConfig, "prices">): Price {
-  const override = config?.prices?.[ref.model];
-  if (override) {
-    return override;
+  const path = process.env.PATH ?? "";
+  for (const part of path.split(delimiter)) {
+    const candidate = join(part, command);
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      // Continue searching PATH.
+    }
   }
-  return PRICE_TABLE[ref.model] ?? { inputUsdPerMTok: 0, outputUsdPerMTok: 0 };
+  return undefined;
 }
 
-export function calculateCostUsd(usage: { inputTokens?: number; outputTokens?: number }, price: Price): number {
-  return ((usage.inputTokens ?? 0) / 1_000_000) * price.inputUsdPerMTok + ((usage.outputTokens ?? 0) / 1_000_000) * price.outputUsdPerMTok;
+export function buildCliInvocation(options: {
+  ref: ModelRef;
+  system: string;
+  prompt: string;
+  budgetUsd: number;
+}): CliInvocation {
+  const command = runnerCommand(options.ref);
+  const timeoutMs = options.ref.timeout_seconds * 1000;
+  if (options.ref.provider === "claude-code") {
+    const tools = options.ref.tools ?? ["Read", "Grep", "Glob"];
+    const args = [
+      "--print",
+      "--output-format",
+      "text",
+      "--no-session-persistence",
+      "--safe-mode",
+      "--permission-mode",
+      "dontAsk",
+      "--system-prompt",
+      options.system,
+      "--tools",
+      tools.join(","),
+      "--max-budget-usd",
+      String(options.budgetUsd),
+      ...(options.ref.model ? ["--model", options.ref.model] : []),
+      ...options.ref.args
+    ];
+    return { command, args, input: options.prompt, timeoutMs };
+  }
+
+  const args = [
+    "exec",
+    "--sandbox",
+    "read-only",
+    "--ask-for-approval",
+    "never",
+    ...(options.ref.model ? ["--model", options.ref.model] : []),
+    ...options.ref.args
+  ];
+  return { command, args, input: `${options.system}\n\n${options.prompt}`, timeoutMs };
 }
