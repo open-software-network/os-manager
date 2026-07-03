@@ -56,7 +56,7 @@ ${input.diff}
 Return JSON:
 {
   "verdict": "approve" | "request_changes",
-  "summaryMarkdown": "GitHub review body",
+  "summaryMarkdown": "issue-thread review summary",
   "comments": [{"path":"relative/path","line":123,"body":"inline comment"}],
   "specChecklist": [{"item":"acceptance criterion","met":true,"note":"evidence"}]
 }`;

@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { testOnly } from "../src/commands/review.js";
 
-function makeCtx(createReview: (args: Record<string, unknown>) => Promise<unknown>) {
+function makeCtx() {
   const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
   const octokit = {
     rest: {
       pulls: {
         createReview: async (args: Record<string, unknown>) => {
           calls.push({ name: "createReview", args });
-          return createReview(args);
+          return {};
         }
       },
       repos: {
@@ -47,22 +47,14 @@ function makeCtx(createReview: (args: Record<string, unknown>) => Promise<unknow
   };
 }
 
-describe("review submission fallbacks", () => {
-  it("retries as a summary review when inline comments target unresolvable lines", async () => {
-    let attempts = 0;
-    const { ctx, calls } = makeCtx(async () => {
-      attempts += 1;
-      if (attempts === 1) {
-        const error = new Error("Unprocessable Entity: Line could not be resolved");
-        (error as Error & { status: number }).status = 422;
-        throw error;
-      }
-      return {};
-    });
+describe("issue-centric review publishing", () => {
+  it("posts request-changes review output to the linked issue, not the PR review API", async () => {
+    const { ctx, calls } = makeCtx();
 
-    const result = await testOnly.submitReview({
+    await testOnly.publishIssueReview({
       ctx: ctx as never,
-      pr: 1,
+      pr: 10,
+      issue: 2,
       headSha: "abc",
       reviewerModel: "reviewer",
       managerModel: "manager",
@@ -74,39 +66,34 @@ describe("review submission fallbacks", () => {
       }
     });
 
-    expect(result).toBe("submitted");
-    const reviews = calls.filter((call) => call.name === "createReview");
-    expect(reviews).toHaveLength(2);
-    expect(reviews[1]?.args).not.toHaveProperty("comments");
-    expect(String(reviews[1]?.args.body)).toContain("Inline comments that could not be placed automatically");
+    expect(calls.some((call) => call.name === "createReview")).toBe(false);
+    expect(calls.some((call) => call.name === "createComment" && call.args.issue_number === 2)).toBe(true);
+    expect(String(calls.find((call) => call.name === "createComment")?.args.body)).toContain("PR #10 review: **changes requested**");
+    expect(String(calls.find((call) => call.name === "createComment")?.args.body)).toContain("`src/a.ts:123`: Fix this.");
     expect(calls.some((call) => call.name === "createCommitStatus" && call.args.state === "failure")).toBe(true);
     expect(calls.some((call) => call.name === "addLabels" && Array.isArray(call.args.labels) && call.args.labels.includes("osm:changes-requested"))).toBe(true);
   });
 
-  it("escalates when GitHub rejects manager self-review", async () => {
-    const { ctx, calls } = makeCtx(async () => {
-      const error = new Error("Unprocessable Entity: Review Can not request changes on your own pull request");
-      (error as Error & { status: number }).status = 422;
-      throw error;
-    });
+  it("sets approval status when the issue-thread review approves", async () => {
+    const { ctx, calls } = makeCtx();
 
-    const result = await testOnly.submitReview({
+    await testOnly.publishIssueReview({
       ctx: ctx as never,
-      pr: 1,
+      pr: 10,
+      issue: 2,
       headSha: "abc",
       reviewerModel: "reviewer",
       managerModel: "manager",
       verdict: {
-        verdict: "request_changes",
-        summaryMarkdown: "Needs changes.",
+        verdict: "approve",
+        summaryMarkdown: "Looks good.",
         comments: [],
         specChecklist: []
       }
     });
 
-    expect(result).toBe("blocked");
-    expect(calls.some((call) => call.name === "createComment" && String(call.args.body).includes("self-review-blocked"))).toBe(true);
-    expect(calls.some((call) => call.name === "createCommitStatus" && call.args.state === "error")).toBe(true);
-    expect(calls.some((call) => call.name === "addLabels" && Array.isArray(call.args.labels) && call.args.labels.includes("osm:escalated"))).toBe(true);
+    expect(calls.some((call) => call.name === "createReview")).toBe(false);
+    expect(calls.some((call) => call.name === "createCommitStatus" && call.args.state === "success")).toBe(true);
+    expect(calls.some((call) => call.name === "addLabels" && Array.isArray(call.args.labels) && call.args.labels.includes("osm:approved"))).toBe(true);
   });
 });

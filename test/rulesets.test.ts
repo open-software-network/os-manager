@@ -25,6 +25,11 @@ describe("rulesets", () => {
       "GET /repos/{owner}/{repo}/rulesets",
       "POST /repos/{owner}/{repo}/rulesets"
     ]);
+    expect((requests.at(-1)?.payload.rules as Array<{ type: string }>).map((rule) => rule.type)).toEqual([
+      "deletion",
+      "non_fast_forward",
+      "required_status_checks"
+    ]);
   });
 
   it("updates the os-manager ruleset when it already exists", async () => {

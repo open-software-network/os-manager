@@ -3,7 +3,7 @@ import { readAsset } from "../assets.js";
 import { parseRepoRef, getRequiredEnv } from "../config.js";
 import { makeOctokit } from "../github/client.js";
 import { ensureLabels } from "../github/labels.js";
-import { createRuleset, generateCodeowners } from "../github/rulesets.js";
+import { createRuleset } from "../github/rulesets.js";
 
 interface RemoteTextFile {
   sha: string;
@@ -97,7 +97,7 @@ async function ensurePullRequest(octokit: ReturnType<typeof makeOctokit>, repo: 
     head: branch,
     base,
     draft: false,
-    body: "Adds os-manager configuration, worker skill, and CODEOWNERS enforcement files."
+    body: "Adds os-manager configuration and worker skill files."
   });
 }
 
@@ -125,11 +125,6 @@ export async function initRepo(options: {
       path: ".claude/skills/work-on-issue/SKILL.md",
       content: await readAsset("work-on-issue/SKILL.md"),
       message: "Add os-manager worker skill"
-    },
-    {
-      path: ".github/CODEOWNERS",
-      content: generateCodeowners(managerLogin),
-      message: "Require os-manager CODEOWNERS review"
     }
   ];
 
@@ -165,12 +160,12 @@ export async function initRepo(options: {
 export function registerInitCommand(program: Command): void {
   program
     .command("init")
-    .description("Bootstrap labels, configuration PR, CODEOWNERS, and ruleset for a repository")
+    .description("Bootstrap labels, configuration PR, worker skill, and ruleset for a repository")
     .requiredOption("--repo <owner/repo>", "GitHub repository")
     .option("--manager <login>", "manager machine account login")
     .option("--dry-run", "avoid GitHub mutations", false)
     .option("--skip-ruleset", "skip ruleset creation", false)
-    .option("--no-bootstrap-pr", "skip creating a bootstrap PR for config/CODEOWNERS/skill files")
+    .option("--no-bootstrap-pr", "skip creating a bootstrap PR for config/skill files")
     .action(async (options: { repo: string; manager?: string; dryRun: boolean; skipRuleset: boolean; bootstrapPr: boolean }) => {
       await initRepo(options);
     });

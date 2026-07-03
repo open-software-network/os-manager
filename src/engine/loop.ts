@@ -32,28 +32,34 @@ function labelNames(labels: Array<string | { name?: string | null }>): string[] 
   return labels.map((label) => (typeof label === "string" ? label : label.name ?? "")).filter(Boolean);
 }
 
-function latestReviewedHeadSha(reviewBodies: Array<string | null | undefined>): string | undefined {
+function issueNumberFromPrBody(body: string | null | undefined): number | undefined {
+  const match = (body ?? "").match(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/i);
+  return match?.[1] ? Number(match[1]) : undefined;
+}
+
+function latestReviewedHeadSha(reviewBodies: Array<string | null | undefined>, prNumber: number): string | undefined {
   for (const body of [...reviewBodies].reverse()) {
     const marker = parseMarkers(body, "review").at(-1);
-    const payload = marker?.payload as { headSha?: unknown } | undefined;
-    if (typeof payload?.headSha === "string") {
+    const payload = marker?.payload as { headSha?: unknown; pr?: unknown } | undefined;
+    if (typeof payload?.headSha === "string" && (payload.pr === undefined || payload.pr === prNumber)) {
       return payload.headSha;
     }
   }
   return undefined;
 }
 
-async function currentPrHeadSha(octokit: Octokit, repo: RepoRef, prNumber: number): Promise<string> {
-  const pull = await octokit.rest.pulls.get({ ...repo, pull_number: prNumber });
-  return pull.data.head.sha;
-}
-
 async function needsReviewForNewHead(octokit: Octokit, repo: RepoRef, prNumber: number): Promise<boolean> {
-  const [headSha, reviews] = await Promise.all([
-    currentPrHeadSha(octokit, repo, prNumber),
-    octokit.paginate(octokit.rest.pulls.listReviews, { ...repo, pull_number: prNumber, per_page: 100 })
-  ]);
-  return latestReviewedHeadSha(reviews.map((review) => review.body)) !== headSha;
+  const pull = await octokit.rest.pulls.get({ ...repo, pull_number: prNumber });
+  const linkedIssue = issueNumberFromPrBody(pull.data.body);
+  if (!linkedIssue) {
+    return true;
+  }
+  const comments = await octokit.paginate(octokit.rest.issues.listComments, {
+    ...repo,
+    issue_number: linkedIssue,
+    per_page: 100
+  });
+  return latestReviewedHeadSha(comments.map((comment) => comment.body), prNumber) !== pull.data.head.sha;
 }
 
 export async function discoverWork(options: TickOptions): Promise<WorkDescriptor[]> {
