@@ -4,13 +4,13 @@ manager:
 models:
   triage:
     provider: claude-code
-    model: fable
+    model: claude-opus-4-8
   plan:
     provider: claude-code
     model: fable
   review:
     provider: claude-code
-    model: sonnet
+    model: claude-opus-4-8
   meta_review:
     provider: claude-code
     model: fable

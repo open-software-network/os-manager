@@ -4,7 +4,7 @@ import { buildCliInvocation, resolveExecutable, runnerCommand } from "../src/llm
 describe("CLI runner provider", () => {
   it("builds a Claude Code read-only print invocation", () => {
     const invocation = buildCliInvocation({
-      ref: { provider: "claude-code", model: "sonnet", args: [], timeout_seconds: 60 },
+      ref: { provider: "claude-code", model: "claude-opus-4-8", args: [], timeout_seconds: 60 },
       system: "system",
       prompt: "prompt",
       budgetUsd: 1
