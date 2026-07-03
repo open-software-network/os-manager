@@ -1,0 +1,42 @@
+manager:
+  login: junhohong
+
+models:
+  triage:
+    provider: openai
+    model: gpt-5
+  plan:
+    provider: openai
+    model: gpt-5
+  review:
+    provider: openai
+    model: gpt-5-mini
+  meta_review:
+    provider: openai
+    model: gpt-5
+
+poll:
+  interval_seconds: 60
+
+policies:
+  triage_prompt: |
+    Approve issues that improve os-manager itself, its documentation, or its test coverage.
+    Reject issues that are vague, unrelated to this CLI, or cannot be validated in the repo.
+  max_review_rounds: 3
+  max_meta_rounds: 2
+  stale_after_hours: 48
+
+budgets:
+  per_task_usd: 5
+  daily_usd: 100
+
+merge:
+  method: squash
+  auto_merge_on_approve: true
+
+escalation:
+  mention:
+    - "@junhohong"
+
+labels:
+  prefix: osm

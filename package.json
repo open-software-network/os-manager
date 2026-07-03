@@ -1,0 +1,43 @@
+{
+  "name": "os-manager",
+  "version": "0.1.0",
+  "description": "GitHub-native manager daemon for issue planning, review, and merge gating.",
+  "type": "module",
+  "bin": {
+    "os-manager": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "assets",
+    "README.md",
+    "PLAN.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^2.0.0",
+    "@ai-sdk/openai": "^2.0.0",
+    "@octokit/plugin-throttling": "^11.0.0",
+    "@octokit/rest": "^22.0.0",
+    "ai": "^5.0.0",
+    "commander": "^14.0.0",
+    "fast-glob": "^3.3.3",
+    "p-limit": "^7.0.0",
+    "pino": "^9.0.0",
+    "yaml": "^2.7.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
