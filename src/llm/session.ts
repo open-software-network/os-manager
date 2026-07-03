@@ -1,8 +1,7 @@
-import { generateText, stepCountIs } from "ai";
+import { spawn } from "node:child_process";
 import { z } from "zod";
-import type { ModelRef, OsManagerConfig } from "../config.js";
-import { calculateCostUsd, priceForModel, resolveModel, type LanguageModelLike } from "./provider.js";
-import { createReadOnlyTools } from "./tools.js";
+import type { ModelRef } from "../config.js";
+import { buildCliInvocation, runnerCommand } from "./provider.js";
 
 export type SessionRole = "triage" | "plan" | "review" | "meta-review";
 
@@ -19,11 +18,8 @@ export interface RunSessionOptions<T> {
   system: string;
   prompt: string;
   cwd: string;
-  maxSteps: number;
   budgetUsd: number;
   verdictSchema: z.ZodType<T>;
-  config?: Pick<OsManagerConfig, "prices">;
-  model?: LanguageModelLike;
   generate?: (args: Record<string, unknown>) => Promise<{ text?: string; usage?: unknown }>;
 }
 
@@ -31,13 +27,6 @@ export interface SessionResult<T> {
   verdict: T;
   rawText: string;
   usage: SessionUsage;
-}
-
-export class SessionBudgetExceededError extends Error {
-  constructor(costUsd: number, budgetUsd: number) {
-    super(`LLM session exceeded budget: $${costUsd.toFixed(4)} > $${budgetUsd.toFixed(4)}`);
-    this.name = "SessionBudgetExceededError";
-  }
 }
 
 export class InvalidVerdictError extends Error {
@@ -72,6 +61,21 @@ function numberValue(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+function runnerEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of [
+    "OSM_GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_APP_PRIVATE_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY"
+  ]) {
+    delete env[key];
+  }
+  return env;
+}
+
 export function extractFinalJson(text: string): unknown {
   const match = text.trim().match(/```json\s*([\s\S]*?)\s*```\s*$/);
   if (!match?.[1]) {
@@ -84,17 +88,60 @@ export function extractFinalJson(text: string): unknown {
   }
 }
 
+async function executeCli(options: RunSessionOptions<unknown>, prompt: string): Promise<{ text: string; usage: Omit<SessionUsage, "costUsd"> }> {
+  const invocation = buildCliInvocation({
+    ref: options.modelRef,
+    system: options.system,
+    prompt,
+    budgetUsd: options.budgetUsd
+  });
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(invocation.command, invocation.args, {
+      cwd: options.cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      env: runnerEnv()
+    });
+    let stdout = "";
+    let stderr = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error(`${runnerCommand(options.modelRef)} timed out after ${options.modelRef.timeout_seconds}s`));
+    }, invocation.timeoutMs);
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk: string) => {
+      stderr += chunk;
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.on("close", (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolve({ text: stdout.trim(), usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 } });
+        return;
+      }
+      reject(new Error(`${runnerCommand(options.modelRef)} exited with code ${code}\n${stderr || stdout}`));
+    });
+    child.stdin.end(invocation.input);
+  });
+}
+
 async function runGenerate(
   options: RunSessionOptions<unknown>,
   prompt: string
 ): Promise<{ text: string; usage: Omit<SessionUsage, "costUsd"> }> {
-  const generate = options.generate ?? ((args: Record<string, unknown>) => generateText(args as never) as never);
+  const generate = options.generate ?? ((args: Record<string, unknown>) => executeCli(options, String(args.prompt ?? "")));
   const result = await generate({
-    model: options.model ?? resolveModel(options.modelRef),
+    runner: options.modelRef,
     system: options.system,
-    prompt,
-    tools: createReadOnlyTools(options.cwd),
-    stopWhen: stepCountIs(options.maxSteps)
+    prompt
   });
   return {
     text: result.text ?? "",
@@ -103,7 +150,6 @@ async function runGenerate(
 }
 
 export async function runSession<T>(options: RunSessionOptions<T>): Promise<SessionResult<T>> {
-  const price = priceForModel(options.modelRef, options.config);
   let totalInputTokens = 0;
   let totalOutputTokens = 0;
   let lastText = "";
@@ -117,10 +163,7 @@ export async function runSession<T>(options: RunSessionOptions<T>): Promise<Sess
     lastText = result.text;
     totalInputTokens += result.usage.inputTokens;
     totalOutputTokens += result.usage.outputTokens;
-    const costUsd = calculateCostUsd({ inputTokens: totalInputTokens, outputTokens: totalOutputTokens }, price);
-    if (costUsd > options.budgetUsd) {
-      throw new SessionBudgetExceededError(costUsd, options.budgetUsd);
-    }
+    const costUsd = 0;
 
     try {
       const parsed = extractFinalJson(result.text);
@@ -144,3 +187,5 @@ export async function runSession<T>(options: RunSessionOptions<T>): Promise<Sess
 
   throw new InvalidVerdictError(`No valid ${options.role} verdict produced.\n\n${lastText}`);
 }
+
+export const testOnly = { runnerEnv };

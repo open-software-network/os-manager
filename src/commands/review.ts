@@ -16,6 +16,30 @@ function reviewEvent(verdict: "approve" | "request_changes"): "APPROVE" | "REQUE
   return verdict === "approve" ? "APPROVE" : "REQUEST_CHANGES";
 }
 
+function runnerLabel(provider: string, model: string | undefined): string {
+  return model ? `${provider}:${model}` : provider;
+}
+
+function isOwnPullRequestReviewError(error: unknown): boolean {
+  const status = typeof error === "object" && error !== null && "status" in error ? Number(error.status) : 0;
+  const message = error instanceof Error ? error.message : String(error);
+  return status === 422 && /your own pull request/i.test(message);
+}
+
+function isUnresolvableLineError(error: unknown): boolean {
+  const status = typeof error === "object" && error !== null && "status" in error ? Number(error.status) : 0;
+  const message = error instanceof Error ? error.message : String(error);
+  return status === 422 && /line could not be resolved/i.test(message);
+}
+
+function unplacedCommentsMarkdown(comments: ReviewComment[]): string {
+  if (comments.length === 0) {
+    return "";
+  }
+  const lines = comments.map((comment) => `- \`${comment.path}:${comment.line}\` — ${comment.body}`);
+  return `\n\nInline comments that could not be placed automatically:\n\n${lines.join("\n")}`;
+}
+
 function combineComments(primary: ReviewComment[], additional: ReviewComment[] = []): ReviewComment[] {
   const seen = new Set<string>();
   const out: ReviewComment[] = [];
@@ -127,27 +151,74 @@ async function submitReview(options: {
   reviewerModel: string;
   managerModel: string;
   dryRun?: boolean | undefined;
-}): Promise<void> {
+}): Promise<"submitted" | "blocked"> {
   if (options.dryRun) {
-    return;
+    return "submitted";
   }
   const body = makeMarker(
     "review",
     { verdict: options.verdict.verdict, headSha: options.headSha, v: 1 },
     `Reviewed by ${options.reviewerModel}; meta-reviewed by ${options.managerModel}.\n\n${options.verdict.summaryMarkdown}`
   );
-  await options.ctx.octokit.rest.pulls.createReview({
-    ...options.ctx.repo,
-    pull_number: options.pr,
-    event: reviewEvent(options.verdict.verdict),
-    body,
-    comments: options.verdict.comments.map((comment) => ({
-      path: comment.path,
-      line: comment.line,
-      side: "RIGHT",
-      body: comment.body
-    }))
-  });
+  const reviewComments = options.verdict.comments.map((comment) => ({
+    path: comment.path,
+    line: comment.line,
+    side: "RIGHT" as const,
+    body: comment.body
+  }));
+  let reviewCreated = false;
+  try {
+    await options.ctx.octokit.rest.pulls.createReview({
+      ...options.ctx.repo,
+      pull_number: options.pr,
+      event: reviewEvent(options.verdict.verdict),
+      body,
+      comments: reviewComments
+    });
+    reviewCreated = true;
+  } catch (error) {
+    if (isUnresolvableLineError(error) && reviewComments.length > 0) {
+      try {
+        await options.ctx.octokit.rest.pulls.createReview({
+          ...options.ctx.repo,
+          pull_number: options.pr,
+          event: reviewEvent(options.verdict.verdict),
+          body: `${body}${unplacedCommentsMarkdown(options.verdict.comments)}`
+        });
+        reviewCreated = true;
+      } catch (retryError) {
+        if (!isOwnPullRequestReviewError(retryError)) {
+          throw retryError;
+        }
+        error = retryError;
+      }
+    }
+    if (!reviewCreated && !isOwnPullRequestReviewError(error)) {
+      throw error;
+    }
+    if (reviewCreated) {
+      // Continue to deterministic status/label effects below.
+    } else {
+    await options.ctx.octokit.rest.issues.createComment({
+      ...options.ctx.repo,
+      issue_number: options.pr,
+      body: makeMarker(
+        "review",
+        { verdict: "escalated", headSha: options.headSha, reason: "self-review-blocked", v: 1 },
+        `os-manager completed the review pipeline, but GitHub rejected the review because the manager token belongs to the PR author. Use a dedicated manager machine account distinct from worker identities. ${formatMentions(options.ctx.config.escalation.mention)}\n\nIntended verdict: \`${options.verdict.verdict}\`\n\n${options.verdict.summaryMarkdown}`
+      )
+    });
+    await options.ctx.octokit.rest.repos.createCommitStatus({
+      ...options.ctx.repo,
+      sha: options.headSha,
+      state: "error",
+      context: "os-manager/approved",
+      description: "Manager token cannot review its own pull request"
+    });
+    await applyPrTransition(options.ctx.octokit, options.ctx.repo, options.pr, "escalated", options.ctx.config.labels.prefix, false);
+    return "blocked";
+    }
+  }
   if (options.verdict.verdict === "approve") {
     await options.ctx.octokit.rest.repos.createCommitStatus({
       ...options.ctx.repo,
@@ -167,6 +238,7 @@ async function submitReview(options: {
     });
     await applyPrTransition(options.ctx.octokit, options.ctx.repo, options.pr, "changes-requested", options.ctx.config.labels.prefix, false);
   }
+  return "submitted";
 }
 
 export async function reviewPr(options: { repo: string; pr: number; config?: string | undefined; dryRun?: boolean | undefined }): Promise<void> {
@@ -248,7 +320,7 @@ export async function reviewPr(options: { repo: string; pr: number; config?: str
       modelRef: ctx.config.models.review,
       config: ctx.config
     });
-    await recordSessionSpend(ctx, reviewerSession.usage);
+    await recordSessionSpend(ctx, reviewerSession.usage, options.dryRun);
     reviewerVerdict = reviewerSession.verdict;
 
     if (!(await ensureDailyBudget(ctx, `pr:${options.pr}:meta-review`, options.pr))) {
@@ -271,7 +343,7 @@ export async function reviewPr(options: { repo: string; pr: number; config?: str
       modelRef: ctx.config.models.meta_review,
       config: ctx.config
     });
-    await recordSessionSpend(ctx, metaSession.usage);
+    await recordSessionSpend(ctx, metaSession.usage, options.dryRun);
     metaVerdict = metaSession.verdict;
     if (metaVerdict.decision !== "revise") {
       break;
@@ -295,15 +367,21 @@ export async function reviewPr(options: { repo: string; pr: number; config?: str
   }
 
   const verdict = finalVerdict(reviewerVerdict, metaVerdict);
-  await submitReview({
+  const submission = await submitReview({
     ctx,
     pr: options.pr,
     verdict,
     headSha: pull.data.head.sha,
-    reviewerModel: ctx.config.models.review.model,
-    managerModel: ctx.config.models.meta_review.model,
+    reviewerModel: runnerLabel(ctx.config.models.review.provider, ctx.config.models.review.model),
+    managerModel: runnerLabel(ctx.config.models.meta_review.provider, ctx.config.models.meta_review.model),
     dryRun: options.dryRun
   });
+  if (submission === "blocked") {
+    if (linkedIssue) {
+      await applyIssueTransition(ctx.octokit, ctx.repo, linkedIssue, "escalated", ctx.config.labels.prefix, false);
+    }
+    return;
+  }
 
   if (verdict.verdict === "approve" && ctx.config.merge.auto_merge_on_approve && !options.dryRun) {
     await ctx.octokit.rest.pulls.merge({
@@ -329,3 +407,10 @@ export function registerReviewCommand(program: Command): void {
       await reviewPr({ repo: options.repo, pr: Number(pr), config: options.config, dryRun: options.dryRun });
     });
 }
+
+export const testOnly = {
+  submitReview,
+  isOwnPullRequestReviewError,
+  isUnresolvableLineError,
+  unplacedCommentsMarkdown
+};

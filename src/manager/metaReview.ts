@@ -59,10 +59,8 @@ export async function runMetaReviewPassSession(options: RunMetaReviewPassOptions
     system: META_REVIEW_SYSTEM_PROMPT,
     prompt: buildMetaReviewPrompt(options),
     cwd: options.cwd,
-    maxSteps: 15,
     budgetUsd: options.config.budgets.per_task_usd,
-    verdictSchema: metaReviewVerdictSchema,
-    config: options.config
+    verdictSchema: metaReviewVerdictSchema
   });
 }
 

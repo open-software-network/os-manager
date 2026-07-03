@@ -19,11 +19,8 @@
     "check": "npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^2.0.0",
-    "@ai-sdk/openai": "^2.0.0",
     "@octokit/plugin-throttling": "^11.0.0",
     "@octokit/rest": "^22.0.0",
-    "ai": "^5.0.0",
     "commander": "^14.0.0",
     "fast-glob": "^3.3.3",
     "p-limit": "^7.0.0",

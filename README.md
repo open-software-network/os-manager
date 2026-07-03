@@ -18,13 +18,16 @@ OSM_GITHUB_TOKEN=... node ./dist/cli.js doctor --repo owner/repo
 - `plan <issue> --repo owner/repo` writes the manager spec and marks the issue ready.
 - `review <pr> --repo owner/repo` runs reviewer -> meta-review, submits the final GitHub review, sets `os-manager/approved`, and optionally squash-merges.
 - `status --repo owner/repo` prints open issues and PRs grouped by lifecycle state.
-- `doctor --repo owner/repo` checks the GitHub identity, labels, protection, and configured provider keys.
+- `doctor --repo owner/repo` checks the GitHub identity, labels, protection, and configured local agent CLIs.
 
 ## Required Environment
 
 - `OSM_GITHUB_TOKEN`: manager machine account token with contents, issues, pull requests, statuses, and ruleset permissions.
-- `ANTHROPIC_API_KEY` if any configured role uses `provider: anthropic`.
-- `OPENAI_API_KEY` if any configured role uses `provider: openai`.
+- A configured local agent CLI for each role:
+  - `provider: claude-code` uses `claude --print` with read-only tools by default.
+  - `provider: codex-cli` uses `codex exec --sandbox read-only --ask-for-approval never`.
+
+No provider API keys are read by os-manager. Authentication and subscription state belong to the selected local CLI.
 
 ## Lifecycle
 
@@ -36,4 +39,4 @@ PRs move through `osm:awaiting-review -> osm:changes-requested -> osm:awaiting-r
 
 ## Safety
 
-LLM sessions get only read-only repository tools. GitHub mutations are performed by deterministic TypeScript after structured verdict parsing. Review markers let the daemon recover from crashes without duplicating model work or GitHub reviews for the same head SHA.
+Agent sessions run through local CLIs in read-only modes with GitHub/provider token environment variables stripped from the subprocess. GitHub mutations are performed by deterministic TypeScript after structured verdict parsing. Review markers let the daemon recover from crashes without duplicating model work or GitHub reviews for the same head SHA.

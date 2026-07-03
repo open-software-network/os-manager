@@ -2,11 +2,11 @@
 
 ## Context
 
-Frontier models (Claude Fable 5, and soon GPT 5.6 Sol) are extremely capable but too expensive to use for every task. os-manager gives engineering teams a hierarchy: **one expensive manager agent** that triages, plans, and gates merges, while **many cheap worker agents** (any coding-agent session) implement, and **cheap reviewer models do the in-depth PR reviews which the manager meta-reviews**. Existing subagent-in-one-session approaches fail because enforcement is only prompt instructions (the orchestrator can "jailbreak" and code itself) and they don't scale to many agents or multiple humans. os-manager makes **GitHub itself the coordination substrate and the enforcement layer**.
+Frontier local coding agents (Claude Code, Codex CLI, and similar tools) are extremely capable but should not be given write authority over GitHub coordination. os-manager gives engineering teams a hierarchy: **one manager agent session** that triages, plans, and gates merges, while **many worker agent sessions** implement, and **a cheaper reviewer agent does the in-depth PR review which the manager meta-reviews**. Existing subagent-in-one-session approaches fail because enforcement is only prompt instructions (the orchestrator can "jailbreak" and code itself) and they don't scale to many agents or multiple humans. os-manager makes **GitHub itself the coordination substrate and the enforcement layer**.
 
 Decisions locked with the user:
 - **Form factor:** CLI daemon (`os-manager watch --repo org/repo`), TypeScript.
-- **Provider-agnostic manager brain:** NOT built on the Claude Agent SDK. The manager must be swappable to any frontier model (GPT 5.6 Sol etc.) — we own a small agentic loop over a provider abstraction.
+- **CLI-runner manager brain:** NOT direct provider API keys. The manager roles run through local coding-agent CLIs such as Claude Code (`claude --print`) or Codex CLI (`codex exec`) so auth, subscriptions, and model routing stay with those tools.
 - **Hierarchical review:** a cheaper model performs the in-depth PR review; the frontier manager reviews that review (endorse / send back / override with commentary). The manager never does the deep review itself.
 - **Workers:** bring-your-own-agent — any coding-agent session invokes an installed `work-on-issue` skill; the manager does not spawn workers in v1.
 - **Enforcement:** GitHub-native — branch protection/ruleset + CODEOWNERS-required review from the manager's machine account + required `os-manager/approved` status check. Workers literally cannot merge.
@@ -16,12 +16,12 @@ Decisions locked with the user:
 
 1. **GitHub labels are the database.** All lifecycle state derives from labels + assignees + review state. No authoritative local state; a daemon restart re-derives everything. Local files are disposable caches only (etags, budget counter, clones).
 2. **The LLM judges; deterministic code acts.** LLM sessions run with a small read-only tool set and end with a structured JSON verdict. os-manager's TypeScript parses the verdict and performs every GitHub mutation. Gives idempotency, auditability, and prompt-injection containment — a malicious issue body can't trick a session into merging because the session *can't* mutate anything.
-3. **No model lock-in.** Every LLM role (triage, plan, review, meta-review) is a `{provider, model}` pair in config. The agentic loop and tools are ours; providers are adapters.
+3. **No direct model API lock-in.** Every agent role (triage, plan, review, meta-review) is a `{provider, model, command?, args?}` CLI runner in config. Switching from Claude Code to Codex CLI is a config change, not an os-manager rewrite.
 4. **Enforcement is GitHub-native**, never prompt-based.
 
 ## Package structure
 
-Node 20+ ESM, `commander` (CLI), `@octokit/rest` + throttling plugin, **Vercel AI SDK (`ai` + `@ai-sdk/anthropic` + `@ai-sdk/openai`)** for provider-agnostic tool-calling (boring, proven multi-provider abstraction; adding a new provider = adding an adapter package + a price-table entry), `yaml` + `zod` (config + tool schemas + verdict schemas), `tsup` (build, bin: `os-manager`), `vitest` (tests), `pino` (logs).
+Node 20+ ESM, `commander` (CLI), `@octokit/rest` + throttling plugin, local agent CLI runners (`claude --print`, `codex exec`), `yaml` + `zod` (config + verdict schemas), `tsup` (build, bin: `os-manager`), `vitest` (tests), `pino` (logs).
 
 ```
 os-manager/
@@ -36,10 +36,10 @@ os-manager/
 │   │   ├── markers.ts            # hidden HTML-comment markers (crash-recovery dedup)
 │   │   └── rulesets.ts           # createRuleset(), verifyProtection(), CODEOWNERS gen
 │   ├── llm/
-│   │   ├── provider.ts           # resolveModel({provider,model}) → AI SDK LanguageModel; PRICE_TABLE
-│   │   ├── session.ts            # runSession(): our agentic loop (generateText w/ tools, maxSteps,
-│   │   │                         #   token→USD cost tracking, budget abort, fenced-JSON verdict extraction)
-│   │   └── tools.ts              # in-process read-only tools: read_file, glob, grep, git_read
+│   │   ├── provider.ts           # build CLI invocations for claude-code / codex-cli runners
+│   │   ├── session.ts            # runSession(): spawn local agent CLI, parse fenced-JSON verdicts,
+│   │   │                         #   retry malformed output once, enforce command timeout/budget flags
+│   │   └── tools.ts              # local read-only helper executors used by tests/future MCP wiring
 │   ├── engine/
 │   │   ├── loop.ts               # tick(): scan → build work items → dispatch
 │   │   ├── scheduler.ts          # p-limit concurrency + per-item in-flight lock
@@ -61,10 +61,10 @@ os-manager/
 
 ## LLM layer (`src/llm/`) — the future-proofing core
 
-- **`provider.ts`:** maps config `{provider: "anthropic"|"openai", model: string}` to an AI SDK `LanguageModel`. `PRICE_TABLE` (per-model $/Mtok in/out, overridable in config) converts usage to USD since providers don't report cost uniformly.
-- **`tools.ts`:** four in-process tools with zod schemas, all sandboxed to the session's workspace dir: `read_file`, `glob`, `grep` (ripgrep), `git_read` (whitelisted subcommands only: `log`, `show`, `diff`, `blame`). No arbitrary shell at all — stronger injection containment than a bash allowlist, and identical behavior across providers.
-- **`session.ts`:** `runSession({role, modelRef, system, prompt, cwd, maxSteps, budgetUsd})` — a loop over AI SDK `generateText` with tools and step limit; accumulates token usage → USD each step and aborts over budget; requires the final message to end with a fenced ```json block matching the role's zod verdict schema; one "your last message did not end with valid JSON" retry, then throw → `osm:escalated`.
-- Per-role step caps: triage 15 / plan 40 / review 60 / meta-review 15.
+- **`provider.ts`:** maps config `{provider: "claude-code"|"codex-cli", model?, command?, args?}` to a local CLI invocation. Claude Code uses `claude --print --safe-mode --permission-mode dontAsk --tools Read,Grep,Glob`; Codex CLI uses `codex exec --sandbox read-only --ask-for-approval never`.
+- **`tools.ts`:** four local read-only helper executors with zod schemas: `read_file`, `glob`, `grep` (ripgrep), `git_read` (whitelisted subcommands only: `log`, `show`, `diff`, `blame`). These remain useful for tests and future MCP/server wiring, but the primary agent execution path is through the selected CLI.
+- **`session.ts`:** `runSession({role, modelRef, system, prompt, cwd, budgetUsd})` — spawns the configured local agent CLI in the workspace; requires the final message to end with a fenced ```json block matching the role's zod verdict schema; one "your last message did not end with valid JSON" retry, then throw → `osm:escalated`.
+- Local CLI sessions are bounded by `timeout_seconds`, CLI-native budget flags where available, and os-manager's review/meta-review round caps.
 
 Verdict schemas — triage: `{verdict: "approve"|"reject", reasoning, commentMarkdown}`; plan: `{specMarkdown, estimatedSize, touchedAreas[]}`; review: `{verdict: "approve"|"request_changes", summaryMarkdown, comments: [{path,line,body}], specChecklist: [{item, met, note}]}`; meta-review: see below.
 
@@ -86,7 +86,7 @@ Only the meta-review's outcome ever reaches GitHub — the reviewer's raw output
 - `watch --repo org/repo [--interval 60] [--once] [--dry-run]` — the daemon. `--once` = single tick (cron/tests); `--dry-run` = print intended actions.
 - `triage <issue>` / `plan <issue>` / `review <pr>` — one-shot versions of exactly the functions `watch` dispatches (one code path; `review` runs the full reviewer→meta-review pipeline).
 - `status` — board view grouped by lifecycle state.
-- `doctor` — verify token identity/scopes, labels, ruleset, CODEOWNERS, provider API keys.
+- `doctor` — verify token identity/scopes, labels, ruleset, CODEOWNERS, and configured local agent CLIs.
 
 ## State machine (labels, prefix `osm:` configurable)
 
@@ -126,18 +126,18 @@ Invoked with an issue URL/number. Protocol:
 
 - **Manager identity:** dedicated machine account (e.g. `<org>-manager-bot`) + fine-grained PAT (Contents/Issues/PRs/Statuses RW) as `OSM_GITHUB_TOKEN`. Must be distinct from every worker identity (otherwise required-review = self-review). GitHub App auth is the flagged v2 upgrade (tamper-proof check runs, higher limits) — keep `github/client.ts` auth pluggable.
 - **Enforcement (`init`, once, admin token):** `CODEOWNERS`: `* @<org>-manager-bot`; ruleset on default branch: 1 approving review + require Code Owners review + dismiss stale approvals on push + required status check `os-manager/approved` + block force pushes, no bypass actors. Invariant: nothing merges without the manager's approval of the exact head SHA.
-- Provider keys via env (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY` — only the ones config references are required); `doctor` verifies everything.
+- Agent auth belongs to the local CLI (`claude auth`, Codex login/config, enterprise gateway, etc.). os-manager does not read provider API keys. `doctor` verifies the configured CLI commands are present.
 
 Config `.github/osmanager.yml`:
 
 ```yaml
 manager: { login: acme-manager-bot }
-models:                                  # every role is {provider, model} — swap freely
-  triage:      { provider: anthropic, model: claude-fable-5 }
-  plan:        { provider: anthropic, model: claude-fable-5 }
-  review:      { provider: anthropic, model: claude-sonnet-5 }   # the cheap in-depth reviewer
-  meta_review: { provider: anthropic, model: claude-fable-5 }    # the frontier judge
-  # future: { provider: openai, model: gpt-5.6-sol }
+models:                                  # every role is a local CLI runner
+  triage:      { provider: claude-code, model: fable }
+  plan:        { provider: claude-code, model: fable }
+  review:      { provider: claude-code, model: sonnet }          # cheaper in-depth reviewer
+  meta_review: { provider: claude-code, model: fable }           # manager judge
+  # optional: { provider: codex-cli, model: gpt-5-codex, args: ["--profile", "readonly_quiet"] }
 poll: { interval_seconds: 60 }
 policies:
   triage_prompt: |                       # appended to triage system prompt — project-fit criteria
@@ -152,12 +152,12 @@ labels: { prefix: osm }
 
 ## Guardrails
 
-Per-task USD cap (usage-tracked each step, abort), daily budget file (`~/.os-manager/state/<repo>/budget.json` — exhausted → idle + comment once), per-role step caps, max review rounds and max meta rounds → escalate, `osm:human-override` blind spot, graceful SIGINT (finish in-flight, no partial label swaps), stale-claim sweep, no-shell read-only tools as prompt-injection containment, `--dry-run` everywhere.
+Per-task USD cap is passed to CLIs that support it (Claude Code `--max-budget-usd`); CLI sessions are also recorded against the daily budget conservatively using the configured per-task cap when exact spend is unavailable; command timeouts, max review rounds and max meta rounds → escalate, `osm:human-override` blind spot, graceful SIGINT (finish in-flight, no partial label swaps), stale-claim sweep, read-only CLI modes and secret-stripped subprocess environments as prompt-injection containment, `--dry-run` everywhere.
 
 ## Milestones (each independently demoable)
 
 - **M1 — Skeleton & state (no LLM):** scaffold, config, Octokit client, labels/state + tests, `init`, `status`, `doctor`. Demo: init a sandbox repo; ruleset visibly blocks a direct merge.
-- **M2 — LLM layer + triage:** `llm/` (provider map, tools, session loop) + triage prompts/verdict + effects + markers. Demo: `os-manager triage` approves a good issue and rejects a bad one with reasoning; same command works with the model swapped in config.
+- **M2 — Agent CLI layer + triage:** `llm/` (CLI runner map, session execution) + triage prompts/verdict + effects + markers. Demo: `os-manager triage` approves a good issue and rejects a bad one with reasoning; same command works with the runner swapped in config.
 - **M3 — Plan:** workspace clones + plan action. Demo: approved issue gains a real spec + `osm:ready`.
 - **M4 — Review pipeline & merge:** PR worktrees, reviewer pass, meta-review pass, review submission, status check, merge. Demo: hand-made PR → cheap model reviews in depth → Fable endorses/revises → inline comments or approve + auto-merge.
 - **M5 — Daemon:** `watch` tick loop, queues, dedup, concurrency, budgets, stale sweep, escalation. Demo: unattended run; kill/restart mid-action produces no duplicate comments.
@@ -165,15 +165,15 @@ Per-task USD cap (usage-tracked each step, abort), daily budget file (`~/.os-man
 
 ## Verification
 
-- **Unit (vitest):** state derivation + transition legality across label-combo fixtures; verdict parsers (well-formed/truncated/prose-wrapped JSON); budget/price-table math; markers; config validation; tool sandboxing (path escape attempts, non-whitelisted git subcommands).
-- **Integration:** `tick()` against fake Octokit fixtures asserting exact enqueued actions and marker-based dedup; `runSession()` against a mocked AI SDK model (scripted tool calls + budget-overshoot abort); review pipeline with a scripted reviewer verdict + scripted meta-review decisions (endorse/revise/override paths).
+- **Unit (vitest):** state derivation + transition legality across label-combo fixtures; verdict parsers (well-formed/truncated/prose-wrapped JSON); CLI invocation construction; markers; config validation; tool sandboxing (path escape attempts, non-whitelisted git subcommands).
+- **Integration:** `tick()` against fake Octokit fixtures asserting exact enqueued actions and marker-based dedup; `runSession()` against a mocked CLI runner; review pipeline with a scripted reviewer verdict + scripted meta-review decisions (endorse/revise/override paths).
 - **E2E (`scripts/e2e.sh`):** dedicated sandbox repo, two credentials (manager PAT + worker login): seed good + bad issues, run `watch --once` repeatedly, drive a scripted worker via headless Claude Code (`claude -p "use the work-on-issue skill on <url>"`), assert final GitHub state (merged PR, `osm:done`, rejected issue closed). Run pre-release; optionally nightly with cheap models in every role.
 
 ## Top risks & mitigations
 
 1. **GitHub can't do perfectly per-actor merge rights** → CODEOWNERS review + dismiss-stale + required status check yields the real invariant (manager approved the exact head SHA); App check-runs close the cosmetic gap in v2.
-2. **Provider abstraction leaks** (tool-calling quirks, token accounting differences across Anthropic/OpenAI) → AI SDK normalizes the wire protocol; our own tools + fenced-JSON verdicts avoid provider-specific structured-output modes; price table owns cost math.
+2. **CLI abstraction leaks** (Claude Code and Codex CLI flags evolve independently) → keep runner invocations small, configurable, and tested; use fenced-JSON verdicts instead of provider-specific structured-output APIs.
 3. **Worker claim races** → assign → re-fetch → sole-assignee check → timestamped claim marker; worst case duplicated effort, never corruption.
 4. **Duplicate actions after crash** → state-from-labels + fresh pre-action check + post-action marker comments.
-5. **Cost runaway** → per-step usage→USD tracking with abort, step caps, daily budget, cheap-model roles (review runs on Sonnet by design), dry-run.
+5. **Cost runaway** → CLI budget flags where available, command timeouts, max review/meta-review rounds, cheap reviewer roles (review runs on Sonnet by design), dry-run.
 6. **Meta-review ping-pong** (reviewer and manager disagree forever) → `max_meta_rounds` cap with `override` as the manager's bounded escape hatch, then human escalation.

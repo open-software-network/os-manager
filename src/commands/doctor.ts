@@ -1,6 +1,7 @@
 import type { Command } from "commander";
 import { allLabelNames } from "../github/labels.js";
 import { verifyProtection } from "../github/rulesets.js";
+import { resolveExecutable, runnerCommand } from "../llm/provider.js";
 import { makeCommandContext } from "./common.js";
 
 export async function doctor(options: { repo: string; config?: string | undefined }): Promise<void> {
@@ -21,10 +22,14 @@ export async function doctor(options: { repo: string; config?: string | undefine
   const protection = await verifyProtection(ctx.octokit, ctx.repo);
   process.stdout.write(protection.ok ? "Protection: ok\n" : `Protection issues: ${protection.notes.join("; ")}\n`);
 
-  for (const model of Object.values(ctx.config.models)) {
-    const env = model.provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY";
-    if (!process.env[env]) {
-      process.stdout.write(`Missing ${env} for ${model.provider}:${model.model}\n`);
+  for (const [role, model] of Object.entries(ctx.config.models)) {
+    const command = runnerCommand(model);
+    const executable = await resolveExecutable(command);
+    if (executable) {
+      process.stdout.write(`${role} runner: ${model.provider} (${command}) found at ${executable}\n`);
+      process.stdout.write(`  note: doctor verifies command presence only; verify ${command} authentication with that CLI directly\n`);
+    } else {
+      process.stdout.write(`${role} runner missing: ${model.provider} command '${command}' was not found on PATH\n`);
     }
   }
 }
@@ -32,7 +37,7 @@ export async function doctor(options: { repo: string; config?: string | undefine
 export function registerDoctorCommand(program: Command): void {
   program
     .command("doctor")
-    .description("Verify token identity, labels, protection, and provider keys")
+    .description("Verify token identity, labels, protection, and local agent CLIs")
     .requiredOption("--repo <owner/repo>", "GitHub repository")
     .option("--config <path>", "config path", ".github/osmanager.yml")
     .action(async (options: { repo: string; config: string }) => {

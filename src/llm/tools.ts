@@ -3,7 +3,6 @@ import { readFile } from "node:fs/promises";
 import { relative, resolve } from "node:path";
 import { promisify } from "node:util";
 import fg from "fast-glob";
-import { tool } from "ai";
 import { z } from "zod";
 
 const execFileAsync = promisify(execFile);
@@ -35,79 +34,73 @@ const gitReadSchema = z.object({
 
 export const allowedGitSubcommands = new Set(["log", "show", "diff", "blame"]);
 
-export function createReadOnlyTools(cwd: string): Record<string, unknown> {
+export function createReadOnlyToolExecutors(cwd: string): Record<string, (input: unknown) => Promise<string>> {
   const root = resolve(cwd);
   return {
-    read_file: tool({
-      description: "Read a UTF-8 text file inside the checked-out repository workspace.",
-      inputSchema: z.object({
+    read_file: async (input: unknown) => {
+      const { path, maxBytes } = z
+        .object({
         path: z.string(),
         maxBytes: z.number().int().positive().max(500_000).default(200_000)
-      }),
-      execute: async ({ path, maxBytes }: { path: string; maxBytes: number }) => {
-        const target = assertInside(root, path);
-        const content = await readFile(target, "utf8");
-        return trimOutput(content, maxBytes);
-      }
-    }),
-    glob: tool({
-      description: "List files matching a glob pattern inside the workspace.",
-      inputSchema: z.object({
+      })
+        .parse(input);
+      const target = assertInside(root, path);
+      const content = await readFile(target, "utf8");
+      return trimOutput(content, maxBytes);
+    },
+    glob: async (input: unknown) => {
+      const { pattern, limit } = z
+        .object({
         pattern: z.string(),
         limit: z.number().int().positive().max(1000).default(200)
-      }),
-      execute: async ({ pattern, limit }: { pattern: string; limit: number }) => {
-        const entries = await fg(pattern, {
-          cwd: root,
-          onlyFiles: true,
-          dot: true,
-          ignore: [".git/**", "node_modules/**", "dist/**"]
-        });
-        return entries.slice(0, limit).join("\n");
-      }
-    }),
-    grep: tool({
-      description: "Search the workspace with ripgrep. Pattern is treated as a ripgrep pattern.",
-      inputSchema: z.object({
+      })
+        .parse(input);
+      const entries = await fg(pattern, {
+        cwd: root,
+        onlyFiles: true,
+        dot: true,
+        ignore: [".git/**", "node_modules/**", "dist/**"]
+      });
+      return entries.slice(0, limit).join("\n");
+    },
+    grep: async (input: unknown) => {
+      const { pattern, path, limit } = z
+        .object({
         pattern: z.string(),
         path: z.string().default("."),
         limit: z.number().int().positive().max(1000).default(200)
-      }),
-      execute: async ({ pattern, path, limit }: { pattern: string; path: string; limit: number }) => {
-        const searchPath = assertInside(root, path);
-        try {
-          const { stdout } = await execFileAsync("rg", ["--line-number", "--no-heading", "--color", "never", pattern, searchPath], {
-            cwd: root,
-            maxBuffer: 1024 * 1024
-          });
-          return stdout.split("\n").slice(0, limit).join("\n");
-        } catch (error) {
-          const maybe = error as { code?: number; stdout?: string };
-          if (maybe.code === 1) {
-            return "";
-          }
-          if (maybe.stdout) {
-            return maybe.stdout.split("\n").slice(0, limit).join("\n");
-          }
-          throw error;
-        }
-      }
-    }),
-    git_read: tool({
-      description: "Run a read-only git command. First arg must be log, show, diff, or blame.",
-      inputSchema: gitReadSchema,
-      execute: async ({ args }: z.infer<typeof gitReadSchema>) => {
-        const [subcommand, ...rest] = args;
-        if (!subcommand || !allowedGitSubcommands.has(subcommand)) {
-          throw new Error(`git subcommand is not allowed: ${subcommand ?? ""}`);
-        }
-        const { stdout, stderr } = await execFileAsync("git", [subcommand, ...rest], {
+      })
+        .parse(input);
+      const searchPath = assertInside(root, path);
+      try {
+        const { stdout } = await execFileAsync("rg", ["--line-number", "--no-heading", "--color", "never", pattern, searchPath], {
           cwd: root,
           maxBuffer: 1024 * 1024
         });
-        return trimOutput(stdout || stderr);
+        return stdout.split("\n").slice(0, limit).join("\n");
+      } catch (error) {
+        const maybe = error as { code?: number; stdout?: string };
+        if (maybe.code === 1) {
+          return "";
+        }
+        if (maybe.stdout) {
+          return maybe.stdout.split("\n").slice(0, limit).join("\n");
+        }
+        throw error;
       }
-    })
+    },
+    git_read: async (input: unknown) => {
+      const { args } = gitReadSchema.parse(input);
+      const [subcommand, ...rest] = args;
+      if (!subcommand || !allowedGitSubcommands.has(subcommand)) {
+        throw new Error(`git subcommand is not allowed: ${subcommand ?? ""}`);
+      }
+      const { stdout, stderr } = await execFileAsync("git", [subcommand, ...rest], {
+        cwd: root,
+        maxBuffer: 1024 * 1024
+      });
+      return trimOutput(stdout || stderr);
+    }
   };
 }
 
