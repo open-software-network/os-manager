@@ -9,7 +9,7 @@ Decisions locked with the user:
 - **CLI-runner manager brain:** NOT direct provider API keys. The manager roles run through local coding-agent CLIs such as Claude Code (`claude --print`) or Codex CLI (`codex exec`) so auth, subscriptions, and model routing stay with those tools.
 - **Hierarchical review:** a cheaper model performs the in-depth PR review; the frontier manager reviews that review (endorse / send back / override with commentary). The manager never does the deep review itself.
 - **Workers:** bring-your-own-agent — any coding-agent session invokes an installed `work-on-issue` skill; the manager does not spawn workers in v1.
-- **Enforcement:** GitHub-native — branch protection/ruleset + CODEOWNERS-required review from the manager's machine account + required `os-manager/approved` status check. Workers literally cannot merge.
+- **Enforcement:** GitHub-native — branch protection/ruleset + required `os-manager/approved` status check on the exact PR head SHA. Workers literally cannot merge until the manager pipeline reports success.
 - **Scope:** full lifecycle in v1: propose → triage → plan → claim → implement → review → meta-review → merge.
 
 ## Architectural stance (drives everything)
@@ -34,7 +34,7 @@ os-manager/
 │   │   ├── labels.ts             # LABELS const, ensureLabels(), applyTransition()
 │   │   ├── state.ts              # deriveIssueState()/derivePrState() — pure fns, heavily tested
 │   │   ├── markers.ts            # hidden HTML-comment markers (crash-recovery dedup)
-│   │   └── rulesets.ts           # createRuleset(), verifyProtection(), CODEOWNERS gen
+│   │   └── rulesets.ts           # createRuleset(), verifyProtection()
 │   ├── llm/
 │   │   ├── provider.ts           # build CLI invocations for claude-code / codex-cli runners
 │   │   ├── session.ts            # runSession(): spawn local agent CLI, parse fenced-JSON verdicts,
@@ -73,20 +73,20 @@ Verdict schemas — triage: `{verdict: "approve"|"reject", reasoning, commentMar
 1. **Reviewer pass (strong model, e.g. `claude-opus-4-8`).** Full PR worktree at `refs/pull/N/head`, `git diff base...head` and the spec comment inlined; explores the checkout via tools. Produces the in-depth review verdict (above) including a spec-compliance checklist.
 2. **Meta-review pass (frontier manager, e.g. `claude-fable-5`).** Input: the spec, the diff (stat + hunks), and the reviewer's full review. Cheap for the frontier model because it reads and judges rather than exploring the repo. Verdict:
    `{decision: "endorse"|"revise"|"override", commentary, revisionGuidance?, overrideVerdict?, additionalComments?: [{path,line,body}]}`
-   - **endorse** → apply the reviewer's verdict + any `additionalComments`, with the manager's commentary in the review summary.
+   - **endorse** → apply the reviewer's verdict + any `additionalComments`, with the manager's commentary in the issue-thread review record.
    - **revise** → re-run the reviewer pass with `revisionGuidance` appended ("you missed X; check Y against the spec"). Max `policies.max_meta_rounds` (default 2) per review round, then `osm:escalated`.
    - **override** → the manager's `overrideVerdict` + commentary is applied directly (bounded escape hatch; keeps the loop finite).
-3. **Deterministic effects.** os-manager submits the final GitHub review (`APPROVE` or `REQUEST_CHANGES` with inline comments, summary crediting "reviewed by <reviewer-model>, approved by <manager-model>"), sets the `os-manager/approved` status on approve, then squash-merges.
+3. **Deterministic effects.** os-manager posts the final review/meta-review record to the linked issue (`approve` or `request_changes`, with file/line notes as bullets), sets the `os-manager/approved` status on the PR head, then squash-merges on approval.
 
-Only the meta-review's outcome ever reaches GitHub — the reviewer's raw output is an internal artifact (logged, and attached to the marker comment for auditability).
+Only the meta-review's outcome ever reaches the issue thread — the reviewer's raw output is an internal artifact folded into the final marker comment for auditability.
 
 ## CLI commands
 
-- `init --repo org/repo` — bootstrap (run with human admin's token): create `osm:*` labels; open a PR adding `.github/osmanager.yml`, `.claude/skills/work-on-issue/SKILL.md`, `CODEOWNERS`; create the ruleset; print any manual steps. Idempotent.
+- `init --repo org/repo` — bootstrap (run with human admin's token): create `osm:*` labels; open a PR adding `.github/osmanager.yml` and `.claude/skills/work-on-issue/SKILL.md`; create the ruleset; print any manual steps. Idempotent.
 - `watch --repo org/repo [--interval 60] [--once] [--dry-run]` — the daemon. `--once` = single tick (cron/tests); `--dry-run` = print intended actions.
 - `triage <issue>` / `plan <issue>` / `review <pr>` — one-shot versions of exactly the functions `watch` dispatches (one code path; `review` runs the full reviewer→meta-review pipeline).
 - `status` — board view grouped by lifecycle state.
-- `doctor` — verify token identity/scopes, labels, ruleset, CODEOWNERS, and configured local agent CLIs.
+- `doctor` — verify token identity/scopes, labels, ruleset, and configured local agent CLIs.
 
 ## State machine (labels, prefix `osm:` configurable)
 
@@ -97,7 +97,7 @@ Key transitions:
 - New unlabeled issue → manager labels `osm:proposed`, triages → approve (comment + `osm:approved`) or reject (reasoned comment + close).
 - `osm:approved` → manager posts spec comment with `<!-- osm:plan -->` marker (bug: root-cause analysis; feature: full spec) → `osm:ready`.
 - Worker claims (assign + `osm:in-progress`), opens PR with `Closes #N` → `osm:in-review` / PR `osm:awaiting-review`.
-- Review round (pipeline above) → APPROVE (+status check + squash-merge) or REQUEST_CHANGES with inline comments. Worker pushes + re-requests review → back in queue. New commits after review are also detected in the tick.
+- Review round (pipeline above) → approve (+status check + squash-merge) or request changes with issue-thread notes. Worker pushes + restores `osm:awaiting-review` → back in queue. New commits after review are also detected in the tick.
 - `osm:in-progress` idle > `stale_after_hours` with no open PR → unassign, reset to `osm:ready`.
 - Review rounds > `max_review_rounds` → `osm:escalated` + @-mention maintainers, manager stops touching it.
 
@@ -107,7 +107,7 @@ Key transitions:
 
 **Polling (etag-conditional GETs), not webhooks, for v1** — runs on a laptop with no inbound network; 304s cost no rate limit; state-from-labels makes missed events harmless. Webhooks = v2 behind the same `tick()` interface.
 
-Tick (default 60s): list open issues → enqueue triage (no `osm:*` label or `osm:proposed`) and plan (`osm:approved`); list open PRs → enqueue review (`osm:awaiting-review` or commits newer than the manager's last review). Hourly: stale sweep + budget-day rollover. Skip anything with `osm:human-override`; if daily budget exhausted, idle loudly.
+Tick (default 60s): list open issues → enqueue triage (no `osm:*` label or `osm:proposed`) and plan (`osm:approved`); list open PRs → enqueue review (`osm:awaiting-review` or commits newer than the manager's last issue-thread review marker). Hourly: stale sweep + budget-day rollover. Skip anything with `osm:human-override`; if daily budget exhausted, idle loudly.
 
 **Idempotency:** (a) fresh label check immediately before acting; (b) every completed action leaves a hidden marker comment (e.g. `<!-- osm:triage {"verdict":"approve","v":1} -->`) so a crash between comment and label is repaired next tick without re-running the LLM. No local DB. Concurrency: `p-limit(2)` + per-item in-flight map; one watch process per repo (documented).
 
@@ -118,14 +118,14 @@ Invoked with an issue URL/number. Protocol:
 2. **Claim:** `gh issue edit --add-assignee @me` → re-fetch → verify sole assignee (race: back off if another login appears) → post claim comment `<!-- osm:claim <login> <ISO> -->` (earlier-timestamp marker wins) → swap `osm:ready` → `osm:in-progress`.
 3. **Read the spec** (`<!-- osm:plan -->` comment) — implement *that*; if the spec is materially wrong, comment and stop, don't freelance.
 4. **Branch & implement:** `osm/issue-<N>-<slug>`, run repo tests/lint.
-5. **Open PR:** body contains `Closes #N` + spec checklist; label `osm:awaiting-review`; request review from manager login (read from `.github/osmanager.yml`).
-6. **Review loop:** on CHANGES_REQUESTED — address every inline comment, push, re-request review, relabel `osm:awaiting-review`. On APPROVED — done; **never merge**.
-7. **Hard rules:** never merge, never touch rulesets/workflows/CODEOWNERS, never remove `osm:` labels you didn't add, never work without `osm:ready`.
+5. **Open PR:** body contains `Closes #N` + spec checklist; label `osm:awaiting-review`.
+6. **Review loop:** on `osm:changes-requested` — address the latest manager issue-thread review comment, push, relabel `osm:awaiting-review`. On `osm:approved` — done; **never merge**.
+7. **Hard rules:** never merge, never touch rulesets/workflows/os-manager configuration, never remove `osm:` labels you didn't add, never work without `osm:ready`.
 
 ## Auth & enforcement
 
-- **Manager identity:** dedicated machine account (e.g. `<org>-manager-bot`) + fine-grained PAT (Contents/Issues/PRs/Statuses RW) as `OSM_GITHUB_TOKEN`. Must be distinct from every worker identity (otherwise required-review = self-review). GitHub App auth is the flagged v2 upgrade (tamper-proof check runs, higher limits) — keep `github/client.ts` auth pluggable.
-- **Enforcement (`init`, once, admin token):** `CODEOWNERS`: `* @<org>-manager-bot`; ruleset on default branch: 1 approving review + require Code Owners review + dismiss stale approvals on push + required status check `os-manager/approved` + block force pushes, no bypass actors. Invariant: nothing merges without the manager's approval of the exact head SHA.
+- **Manager identity:** fine-grained PAT (Contents/Issues/PRs/Statuses/Rulesets RW) as `OSM_GITHUB_TOKEN`. A dedicated machine account is still cleaner operationally, but the issue-thread review model no longer depends on GitHub's PR self-review mechanics. GitHub App auth is the flagged v2 upgrade (tamper-proof check runs, higher limits) — keep `github/client.ts` auth pluggable.
+- **Enforcement (`init`, once, admin token):** ruleset on default branch: required status check `os-manager/approved` + block force pushes/deletions, no bypass actors. Invariant: nothing merges without the manager's status approval of the exact head SHA.
 - Agent auth belongs to the local CLI (`claude auth`, Codex login/config, enterprise gateway, etc.). os-manager does not read provider API keys. `doctor` verifies the configured CLI commands are present.
 
 Config `.github/osmanager.yml`:
@@ -159,7 +159,7 @@ Per-task USD cap is passed to CLIs that support it (Claude Code `--max-budget-us
 - **M1 — Skeleton & state (no LLM):** scaffold, config, Octokit client, labels/state + tests, `init`, `status`, `doctor`. Demo: init a sandbox repo; ruleset visibly blocks a direct merge.
 - **M2 — Agent CLI layer + triage:** `llm/` (CLI runner map, session execution) + triage prompts/verdict + effects + markers. Demo: `os-manager triage` approves a good issue and rejects a bad one with reasoning; same command works with the runner swapped in config.
 - **M3 — Plan:** workspace clones + plan action. Demo: approved issue gains a real spec + `osm:ready`.
-- **M4 — Review pipeline & merge:** PR worktrees, reviewer pass, meta-review pass, review submission, status check, merge. Demo: hand-made PR → cheap model reviews in depth → Fable endorses/revises → inline comments or approve + auto-merge.
+- **M4 — Review pipeline & merge:** PR worktrees, reviewer pass, meta-review pass, issue-thread review record, status check, merge. Demo: hand-made PR → reviewer model reviews in depth → Fable endorses/revises → issue-thread change notes or approve + auto-merge.
 - **M5 — Daemon:** `watch` tick loop, queues, dedup, concurrency, budgets, stale sweep, escalation. Demo: unattended run; kill/restart mid-action produces no duplicate comments.
 - **M6 — Worker skill & full lifecycle:** SKILL.md final, claim-race hardening, `scripts/e2e.sh`. Money demo: issue filed → triaged → planned → worker session claims via skill → PR → reviewer + meta-review request changes → fix → approved & merged → `osm:done`, no human touch.
 
@@ -171,9 +171,9 @@ Per-task USD cap is passed to CLIs that support it (Claude Code `--max-budget-us
 
 ## Top risks & mitigations
 
-1. **GitHub can't do perfectly per-actor merge rights** → CODEOWNERS review + dismiss-stale + required status check yields the real invariant (manager approved the exact head SHA); App check-runs close the cosmetic gap in v2.
+1. **GitHub can't do perfectly per-actor merge rights** → required status check yields the real invariant (manager approved the exact head SHA); App check-runs close the spoofing/cosmetic gap in v2.
 2. **CLI abstraction leaks** (Claude Code and Codex CLI flags evolve independently) → keep runner invocations small, configurable, and tested; use fenced-JSON verdicts instead of provider-specific structured-output APIs.
 3. **Worker claim races** → assign → re-fetch → sole-assignee check → timestamped claim marker; worst case duplicated effort, never corruption.
 4. **Duplicate actions after crash** → state-from-labels + fresh pre-action check + post-action marker comments.
-5. **Cost runaway** → CLI budget flags where available, command timeouts, max review/meta-review rounds, cheap reviewer roles (review runs on Sonnet by design), dry-run.
+5. **Cost runaway** → CLI budget flags where available, command timeouts, max review/meta-review rounds, configurable reviewer roles, dry-run.
 6. **Meta-review ping-pong** (reviewer and manager disagree forever) → `max_meta_rounds` cap with `override` as the manager's bounded escape hatch, then human escalation.

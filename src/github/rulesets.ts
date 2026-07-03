@@ -1,11 +1,6 @@
 import type { Octokit } from "@octokit/rest";
 import type { RepoRef } from "../config.js";
 
-export function generateCodeowners(managerLogin: string): string {
-  const login = managerLogin.startsWith("@") ? managerLogin : `@${managerLogin}`;
-  return `# Managed by os-manager. All changes require manager approval.\n* ${login}\n`;
-}
-
 const RULESET_NAME = "os-manager default branch protection";
 
 function rulesetPayload(defaultBranch: string, requiredStatusCheck: string) {
@@ -22,16 +17,6 @@ function rulesetPayload(defaultBranch: string, requiredStatusCheck: string) {
     rules: [
       { type: "deletion" as const },
       { type: "non_fast_forward" as const },
-      {
-        type: "pull_request" as const,
-        parameters: {
-          dismiss_stale_reviews_on_push: true,
-          require_code_owner_review: true,
-          require_last_push_approval: true,
-          required_approving_review_count: 1,
-          required_review_thread_resolution: true
-        }
-      },
       {
         type: "required_status_checks" as const,
         parameters: {
@@ -81,12 +66,6 @@ export async function verifyProtection(octokit: Octokit, repo: RepoRef): Promise
   const hasRuleset = rulesets.data.some((ruleset) => ruleset.name === RULESET_NAME);
   if (!hasRuleset) {
     notes.push("Missing os-manager ruleset");
-  }
-
-  try {
-    await octokit.rest.repos.getContent({ ...repo, path: ".github/CODEOWNERS" });
-  } catch {
-    notes.push("Missing .github/CODEOWNERS");
   }
 
   return { ok: notes.length === 0, notes };

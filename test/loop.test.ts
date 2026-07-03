@@ -98,13 +98,12 @@ describe("work discovery", () => {
 
   it("queues review when a PR head changed after the last os-manager review", async () => {
     const listForRepo = () => undefined;
-    const listReviews = () => undefined;
+    const listComments = () => undefined;
     const octokit = {
       rest: {
-        issues: { listForRepo },
+        issues: { listForRepo, listComments },
         pulls: {
-          get: async () => ({ data: { head: { sha: "new-sha" } } }),
-          listReviews
+          get: async () => ({ data: { body: "Closes #1", head: { sha: "new-sha" } } })
         }
       },
       paginate: async (method: unknown) => {
@@ -119,8 +118,8 @@ describe("work discovery", () => {
             }
           ];
         }
-        if (method === listReviews) {
-          return [{ body: "<!-- osm:review {\"verdict\":\"request_changes\",\"headSha\":\"old-sha\",\"v\":1} -->" }];
+        if (method === listComments) {
+          return [{ body: "<!-- osm:review {\"verdict\":\"request_changes\",\"pr\":10,\"headSha\":\"old-sha\",\"v\":1} -->" }];
         }
         return [];
       }
@@ -145,13 +144,12 @@ describe("work discovery", () => {
 
   it("does not queue review when the latest os-manager review matches the PR head", async () => {
     const listForRepo = () => undefined;
-    const listReviews = () => undefined;
+    const listComments = () => undefined;
     const octokit = {
       rest: {
-        issues: { listForRepo },
+        issues: { listForRepo, listComments },
         pulls: {
-          get: async () => ({ data: { head: { sha: "same-sha" } } }),
-          listReviews
+          get: async () => ({ data: { body: "Closes #1", head: { sha: "same-sha" } } })
         }
       },
       paginate: async (method: unknown) => {
@@ -166,8 +164,8 @@ describe("work discovery", () => {
             }
           ];
         }
-        if (method === listReviews) {
-          return [{ body: "<!-- osm:review {\"verdict\":\"approve\",\"headSha\":\"same-sha\",\"v\":1} -->" }];
+        if (method === listComments) {
+          return [{ body: "<!-- osm:review {\"verdict\":\"approve\",\"pr\":11,\"headSha\":\"same-sha\",\"v\":1} -->" }];
         }
         return [];
       }

@@ -20,20 +20,20 @@ Use this skill only when asked to work on an os-manager managed GitHub issue.
    - Implement that spec. If the spec is materially wrong or impossible, comment with the blocker and stop.
 4. Branch and implement:
    - Create a branch named `osm/issue-<number>-<short-slug>`.
-   - Do not touch repository rulesets, workflows, CODEOWNERS, or os-manager configuration unless the spec explicitly targets os-manager itself.
+   - Do not touch repository rulesets, workflows, or os-manager configuration unless the spec explicitly targets os-manager itself.
    - Run the repository's relevant tests and lint checks.
 5. Open the PR:
    - The body must contain `Closes #<issue-number>`.
    - Include a spec checklist with each acceptance criterion.
    - Add the `osm:awaiting-review` label.
-   - Request review from the manager login in `.github/osmanager.yml`.
 6. Review loop:
-   - On `CHANGES_REQUESTED`, address every inline comment, push, re-request review, and restore the `osm:awaiting-review` label.
-   - On `APPROVED`, stop. Never merge.
+   - Watch the linked issue thread for `<!-- osm:review ... -->` manager comments.
+   - If the PR is labeled `osm:changes-requested`, address the latest manager issue comment, push, and restore the `osm:awaiting-review` label.
+   - If the PR is labeled `osm:approved`, stop. Never merge.
 
 ## Hard Rules
 
 - Never merge the PR.
 - Never remove os-manager labels you did not add.
 - Never work without `osm:ready`.
-- Never bypass branch protection or required manager review.
+- Never bypass branch protection or the required `os-manager/approved` status check.
