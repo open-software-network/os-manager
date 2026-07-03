@@ -1,42 +1,262 @@
 # os-manager
 
-`os-manager` is a GitHub-native manager daemon for issue triage, planning, review, and merge gating.
+GitHub-native coordination for teams running coding agents.
 
-The v1 shape is a Node 20+ TypeScript CLI:
+`os-manager` is a Node 20+ TypeScript CLI that turns GitHub issues, pull
+requests, labels, rulesets, and status checks into a manager-controlled software
+delivery loop. Local coding agents can implement work, but the manager owns
+triage, planning, review records, approval status, and merge gating.
+
+The result is a practical hierarchy:
+
+- Humans decide what the repository should accept.
+- `os-manager` turns accepted issues into worker-ready specs and enforces the
+  lifecycle in GitHub.
+- Worker agents implement issues from those specs without receiving merge
+  authority.
+- A reviewer model performs detailed PR review.
+- A manager model meta-reviews that review, writes the final manager record to
+  the linked issue, sets `os-manager/approved`, and optionally merges.
+
+## Why This Exists
+
+Modern coding agents are strong enough to make real changes, but giving every
+agent write authority over project coordination is risky. Prompt instructions
+alone are not an enforcement boundary, and a single orchestrator session does
+not scale cleanly across multiple agents and humans.
+
+`os-manager` uses GitHub as both the coordination surface and the enforcement
+layer. Labels are the state machine. The required `os-manager/approved` status
+check is the merge gate. LLM sessions judge and produce structured verdicts,
+while deterministic TypeScript performs every GitHub mutation.
+
+## What It Does
+
+- Bootstraps a repository with `osm:*` lifecycle labels, a manager config file,
+  worker skill, and branch ruleset.
+- Triage issues into accepted or rejected work.
+- Turn accepted issues into concrete implementation specs.
+- Track issue and PR state through labels instead of a private database.
+- Run a reviewer -> meta-reviewer pipeline for pull requests.
+- Post the final manager review record to the linked issue thread.
+- Set the `os-manager/approved` status check and merge approved PRs when
+  configured to do so.
+- Recover from crashes using hidden marker comments, so repeated daemon ticks do
+  not duplicate completed work.
+
+## What It Does Not Do
+
+- It does not call model provider APIs directly.
+- It does not store provider API keys.
+- It does not spawn worker agents in v1.
+- It does not rely on prompt instructions for merge enforcement.
+
+Agent work runs through local CLIs such as Claude Code or Codex CLI. Their
+authentication, subscriptions, routing, and model access stay with those tools.
+
+## Quick Start
+
+Install dependencies and build the CLI:
 
 ```sh
 npm install
 npm run build
-OSM_GITHUB_TOKEN=... node ./dist/cli.js doctor --repo owner/repo
 ```
 
-## Commands
+Create a GitHub token for the manager identity and export it:
 
-- `init --repo owner/repo` creates `osm:*` labels, opens a PR with `.github/osmanager.yml`, installs the worker skill, and creates or updates the ruleset.
-- `watch --repo owner/repo [--once] [--dry-run]` polls GitHub and dispatches triage, planning, review, and stale-claim work.
-- `triage <issue> --repo owner/repo` runs one issue triage pass.
-- `plan <issue> --repo owner/repo` writes the manager spec and marks the issue ready.
-- `review <pr> --repo owner/repo` runs reviewer -> meta-review, posts the final manager record to the linked issue, sets `os-manager/approved`, and optionally squash-merges.
-- `status --repo owner/repo` prints open issues and PRs grouped by lifecycle state.
-- `doctor --repo owner/repo` checks the GitHub identity, labels, protection, and configured local agent CLIs.
+```sh
+export OSM_GITHUB_TOKEN=github_pat_or_token_here
+```
 
-## Required Environment
+The token should belong to the manager machine account for day-to-day operation.
+For bootstrap, it also needs enough repository access to create labels, write
+configuration files, create rulesets, set statuses, update issues and PRs, and
+merge approved pull requests.
 
-- `OSM_GITHUB_TOKEN`: manager machine account token with contents, issues, pull requests, statuses, and ruleset permissions.
-- A configured local agent CLI for each role:
-  - `provider: claude-code` uses `claude --print` with read-only tools by default.
-  - `provider: codex-cli` uses `codex exec --sandbox read-only --ask-for-approval never`.
+Bootstrap a target repository:
 
-No provider API keys are read by os-manager. Authentication and subscription state belong to the selected local CLI.
+```sh
+node ./dist/cli.js init --repo owner/repo --manager owner-manager-bot
+```
+
+Check the installation:
+
+```sh
+node ./dist/cli.js doctor --repo owner/repo
+```
+
+Run one daemon tick:
+
+```sh
+node ./dist/cli.js watch --repo owner/repo --once
+```
+
+Run continuously:
+
+```sh
+node ./dist/cli.js watch --repo owner/repo
+```
 
 ## Lifecycle
 
-Issues move through `osm:proposed -> osm:approved -> osm:ready -> osm:in-progress -> osm:in-review -> osm:done`.
+Issues move through:
 
-PRs move through `osm:awaiting-review -> osm:changes-requested -> osm:awaiting-review` until approved, then `osm:approved`. Review and meta-review commentary is written to the linked issue thread; the PR carries labels and the required `os-manager/approved` status check.
+```text
+osm:proposed -> osm:approved -> osm:ready -> osm:in-progress -> osm:in-review -> osm:done
+```
 
-`osm:human-override` makes the daemon skip an item. `osm:escalated` marks an item that needs a human.
+Pull requests move through:
 
-## Safety
+```text
+osm:awaiting-review -> osm:changes-requested -> osm:awaiting-review -> osm:approved
+```
 
-Agent sessions run through local CLIs in read-only modes with GitHub/provider token environment variables stripped from the subprocess. GitHub mutations are performed by deterministic TypeScript after structured verdict parsing. Review markers on the issue thread let the daemon recover from crashes without duplicating model work for the same PR head SHA.
+Review and meta-review commentary is written to the linked issue thread. The PR
+carries lifecycle labels and the required `os-manager/approved` status check.
+
+Additional labels provide operational control:
+
+- `osm:human-override` tells the daemon to skip an item.
+- `osm:escalated` marks work that needs a human decision.
+- `osm:stale` marks a claim that timed out and was returned to the ready queue.
+
+## Core Workflow
+
+1. A new GitHub issue appears.
+2. `os-manager watch` labels it `osm:proposed` and runs triage.
+3. Approved work receives a plan comment marked with `<!-- osm:plan -->` and
+   moves to `osm:ready`.
+4. A worker agent claims the issue, follows the installed
+   `.claude/skills/work-on-issue/SKILL.md`, implements the spec, and opens a PR
+   that closes the issue.
+5. `os-manager` runs a detailed reviewer pass, then a manager meta-review pass.
+6. The manager posts the final review record to the linked issue thread.
+7. Approved PRs receive the `os-manager/approved` status check and can be merged
+   automatically according to config.
+
+## Configuration
+
+`init` opens a bootstrap PR that adds `.github/osmanager.yml`. A minimal config
+looks like this:
+
+```yaml
+manager:
+  login: acme-manager-bot
+
+models:
+  triage:
+    provider: claude-code
+    model: claude-opus-4-8
+  plan:
+    provider: claude-code
+    model: fable
+  review:
+    provider: claude-code
+    model: claude-opus-4-8
+  meta_review:
+    provider: claude-code
+    model: fable
+
+poll:
+  interval_seconds: 60
+
+policies:
+  triage_prompt: ""
+  max_review_rounds: 3
+  max_meta_rounds: 2
+  stale_after_hours: 48
+
+budgets:
+  per_task_usd: 5
+  daily_usd: 100
+
+merge:
+  method: squash
+  auto_merge_on_approve: true
+
+escalation:
+  mention:
+    - "@junhohong"
+
+labels:
+  prefix: osm
+```
+
+Supported providers are `claude-code` and `codex-cli`. Each role can also set a
+custom command, extra args, tools, and timeout.
+
+## CLI Reference
+
+```sh
+node ./dist/cli.js init --repo owner/repo [--manager login] [--dry-run] [--skip-ruleset] [--no-bootstrap-pr]
+```
+
+Bootstraps labels, configuration, worker skill, and the status-check ruleset.
+
+```sh
+node ./dist/cli.js doctor --repo owner/repo [--config path]
+```
+
+Verifies the token identity, labels, protection, and configured local agent CLI
+commands.
+
+```sh
+node ./dist/cli.js status --repo owner/repo [--config path]
+```
+
+Prints open issues and PRs grouped by derived lifecycle state.
+
+```sh
+node ./dist/cli.js watch --repo owner/repo [--config path] [--interval seconds] [--once] [--dry-run]
+```
+
+Runs the polling daemon. `--once` is useful for cron, tests, and manual
+operation.
+
+```sh
+node ./dist/cli.js triage <issue> --repo owner/repo [--config path] [--dry-run]
+node ./dist/cli.js plan <issue> --repo owner/repo [--config path] [--dry-run]
+node ./dist/cli.js review <pr> --repo owner/repo [--config path] [--dry-run]
+```
+
+Run one lifecycle action directly.
+
+## Safety Model
+
+`os-manager` is built around a simple boundary: LLM sessions can judge, but only
+deterministic code can act.
+
+- The manager runs local agent CLIs with constrained prompts and structured JSON
+  verdicts.
+- GitHub tokens and provider token environment variables are stripped from model
+  subprocesses.
+- Hidden marker comments on issue threads make actions idempotent after crashes
+  or restarts.
+- Branch protection requires the `os-manager/approved` status check.
+- Worker agents never need merge authority.
+
+For production use, the manager token should belong to a dedicated machine
+account that is distinct from human developers and worker identities. That keeps
+the approval trail clear and prevents worker identities from holding the status
+check and merge authority.
+
+## Development
+
+Run the full local check:
+
+```sh
+npm run check
+```
+
+Individual commands:
+
+```sh
+npm run typecheck
+npm test
+npm run build
+```
+
+The main implementation lives in `src/`, the installed worker protocol lives in
+`assets/work-on-issue/SKILL.md`, and `PLAN.md` captures the v1 architecture and
+milestones.
