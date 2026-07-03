@@ -5,9 +5,9 @@ import type { OsManagerConfig } from "../src/config.js";
 const config: OsManagerConfig = {
   manager: { login: "bot" },
   models: {
-    triage: { provider: "claude-code", model: "fable", args: [], timeout_seconds: 900 },
+    triage: { provider: "claude-code", model: "claude-opus-4-8", args: [], timeout_seconds: 900 },
     plan: { provider: "claude-code", model: "fable", args: [], timeout_seconds: 900 },
-    review: { provider: "claude-code", model: "sonnet", args: [], timeout_seconds: 900 },
+    review: { provider: "claude-code", model: "claude-opus-4-8", args: [], timeout_seconds: 900 },
     meta_review: { provider: "claude-code", model: "fable", args: [], timeout_seconds: 900 }
   },
   poll: { interval_seconds: 60 },

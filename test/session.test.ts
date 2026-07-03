@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { extractFinalJson, runSession, testOnly } from "../src/llm/session.js";
 
-const modelRef = { provider: "claude-code" as const, model: "sonnet", args: [], timeout_seconds: 900 };
+const modelRef = { provider: "claude-code" as const, model: "claude-opus-4-8", args: [], timeout_seconds: 900 };
 const schema = z.object({ verdict: z.literal("approve") });
 
 describe("LLM session", () => {
@@ -53,7 +53,7 @@ describe("LLM session", () => {
       }
     });
 
-    expect(args?.runner).toMatchObject({ provider: "claude-code", model: "sonnet" });
+    expect(args?.runner).toMatchObject({ provider: "claude-code", model: "claude-opus-4-8" });
   });
 
   it("does not infer API spend from token counts for CLI runners", async () => {

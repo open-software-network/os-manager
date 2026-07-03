@@ -70,8 +70,8 @@ Verdict schemas — triage: `{verdict: "approve"|"reject", reasoning, commentMar
 
 ## Hierarchical review pipeline (per PR review round)
 
-1. **Reviewer pass (cheap model, e.g. `claude-sonnet-5`).** Full PR worktree at `refs/pull/N/head`, `git diff base...head` and the spec comment inlined; explores the checkout via tools. Produces the in-depth review verdict (above) including a spec-compliance checklist.
-2. **Meta-review pass (frontier manager, e.g. `claude-fable-5`).** Input: the spec, the diff (stat + hunks), and the reviewer's full review. Cheap for the frontier model — it reads and judges rather than exploring the repo. Verdict:
+1. **Reviewer pass (strong model, e.g. `claude-opus-4-8`).** Full PR worktree at `refs/pull/N/head`, `git diff base...head` and the spec comment inlined; explores the checkout via tools. Produces the in-depth review verdict (above) including a spec-compliance checklist.
+2. **Meta-review pass (frontier manager, e.g. `claude-fable-5`).** Input: the spec, the diff (stat + hunks), and the reviewer's full review. Cheap for the frontier model because it reads and judges rather than exploring the repo. Verdict:
    `{decision: "endorse"|"revise"|"override", commentary, revisionGuidance?, overrideVerdict?, additionalComments?: [{path,line,body}]}`
    - **endorse** → apply the reviewer's verdict + any `additionalComments`, with the manager's commentary in the review summary.
    - **revise** → re-run the reviewer pass with `revisionGuidance` appended ("you missed X; check Y against the spec"). Max `policies.max_meta_rounds` (default 2) per review round, then `osm:escalated`.
@@ -133,9 +133,9 @@ Config `.github/osmanager.yml`:
 ```yaml
 manager: { login: acme-manager-bot }
 models:                                  # every role is a local CLI runner
-  triage:      { provider: claude-code, model: fable }
+  triage:      { provider: claude-code, model: claude-opus-4-8 }
   plan:        { provider: claude-code, model: fable }
-  review:      { provider: claude-code, model: sonnet }          # cheaper in-depth reviewer
+  review:      { provider: claude-code, model: claude-opus-4-8 }  # in-depth reviewer
   meta_review: { provider: claude-code, model: fable }           # manager judge
   # optional: { provider: codex-cli, model: gpt-5-codex, args: ["--profile", "readonly_quiet"] }
 poll: { interval_seconds: 60 }
