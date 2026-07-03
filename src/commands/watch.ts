@@ -11,6 +11,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 async function staleIssue(options: { repo: string; issue: number; config?: string | undefined; dryRun?: boolean | undefined }): Promise<void> {
   const ctx = await makeCommandContext({ repo: options.repo, config: options.config });
   if (options.dryRun) {
@@ -63,6 +67,10 @@ export async function watch(options: {
       });
       if (options.once && enqueued) {
         await enqueued;
+      } else if (enqueued) {
+        enqueued.catch((error: unknown) => {
+          process.stderr.write(`[os-manager] ${item.id} failed: ${errorMessage(error)}\n`);
+        });
       }
     }
     if (options.once) {

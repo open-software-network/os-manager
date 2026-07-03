@@ -62,6 +62,40 @@ describe("work discovery", () => {
     expect(work.map((item) => item.kind)).toEqual(["triage", "plan", "review", "stale"]);
   });
 
+  it("queues review for new untracked PRs", async () => {
+    const listForRepo = () => undefined;
+    const octokit = {
+      rest: {
+        issues: { listForRepo }
+      },
+      paginate: async () => [
+        {
+          number: 12,
+          title: "new pr",
+          labels: [],
+          pull_request: {},
+          updated_at: "2026-07-03T00:00:00Z"
+        }
+      ]
+    };
+
+    const work = await discoverWork({
+      octokit: octokit as never,
+      repo: { owner: "o", repo: "r" },
+      config,
+      now: new Date("2026-07-03T12:00:00Z")
+    });
+
+    expect(work).toEqual([
+      {
+        id: "pr:12:review",
+        kind: "review",
+        number: 12,
+        reason: "new PR needs manager review"
+      }
+    ]);
+  });
+
   it("queues review when a PR head changed after the last os-manager review", async () => {
     const listForRepo = () => undefined;
     const listReviews = () => undefined;

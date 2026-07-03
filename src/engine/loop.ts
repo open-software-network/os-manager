@@ -74,8 +74,13 @@ export async function discoverWork(options: TickOptions): Promise<WorkDescriptor
       if (prState.flags.humanOverride || prState.flags.escalated) {
         continue;
       }
-      if (prState.state === "awaiting-review") {
-        work.push({ id: `pr:${item.number}:review`, kind: "review", number: item.number, reason: "PR awaiting manager review" });
+      if (prState.state === "untracked" || prState.state === "awaiting-review") {
+        work.push({
+          id: `pr:${item.number}:review`,
+          kind: "review",
+          number: item.number,
+          reason: prState.state === "untracked" ? "new PR needs manager review" : "PR awaiting manager review"
+        });
         continue;
       }
       if ((prState.state === "changes-requested" || prState.state === "approved") && (await needsReviewForNewHead(options.octokit, options.repo, item.number))) {
