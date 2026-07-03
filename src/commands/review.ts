@@ -20,6 +20,27 @@ function runnerLabel(provider: string, model: string | undefined): string {
   return model ? `${provider}:${model}` : provider;
 }
 
+type ApprovalStatusState = "error" | "failure" | "pending" | "success";
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function setApprovalStatus(
+  ctx: Awaited<ReturnType<typeof makeCommandContext>>,
+  headSha: string,
+  state: ApprovalStatusState,
+  description: string
+): Promise<void> {
+  await ctx.octokit.rest.repos.createCommitStatus({
+    ...ctx.repo,
+    sha: headSha,
+    state,
+    context: "os-manager/approved",
+    description
+  });
+}
+
 function isOwnPullRequestReviewError(error: unknown): boolean {
   const status = typeof error === "object" && error !== null && "status" in error ? Number(error.status) : 0;
   const message = error instanceof Error ? error.message : String(error);
@@ -100,13 +121,7 @@ async function repairReviewEffects(options: {
   mergeTitle: string;
 }): Promise<void> {
   if (options.verdict === "approve") {
-    await options.ctx.octokit.rest.repos.createCommitStatus({
-      ...options.ctx.repo,
-      sha: options.headSha,
-      state: "success",
-      context: "os-manager/approved",
-      description: "Approved by os-manager review pipeline"
-    });
+    await setApprovalStatus(options.ctx, options.headSha, "success", "Approved by os-manager review pipeline");
     await applyPrTransition(options.ctx.octokit, options.ctx.repo, options.pr, "approved", options.ctx.config.labels.prefix, false);
     if (options.ctx.config.merge.auto_merge_on_approve) {
       const pull = await options.ctx.octokit.rest.pulls.get({ ...options.ctx.repo, pull_number: options.pr });
@@ -126,13 +141,7 @@ async function repairReviewEffects(options: {
   }
 
   if (options.verdict === "request_changes") {
-    await options.ctx.octokit.rest.repos.createCommitStatus({
-      ...options.ctx.repo,
-      sha: options.headSha,
-      state: "failure",
-      context: "os-manager/approved",
-      description: "Changes requested by os-manager review pipeline"
-    });
+    await setApprovalStatus(options.ctx, options.headSha, "failure", "Changes requested by os-manager review pipeline");
     await applyPrTransition(options.ctx.octokit, options.ctx.repo, options.pr, "changes-requested", options.ctx.config.labels.prefix, false);
     return;
   }
@@ -208,34 +217,16 @@ async function submitReview(options: {
         `os-manager completed the review pipeline, but GitHub rejected the review because the manager token belongs to the PR author. Use a dedicated manager machine account distinct from worker identities. ${formatMentions(options.ctx.config.escalation.mention)}\n\nIntended verdict: \`${options.verdict.verdict}\`\n\n${options.verdict.summaryMarkdown}`
       )
     });
-    await options.ctx.octokit.rest.repos.createCommitStatus({
-      ...options.ctx.repo,
-      sha: options.headSha,
-      state: "error",
-      context: "os-manager/approved",
-      description: "Manager token cannot review its own pull request"
-    });
+    await setApprovalStatus(options.ctx, options.headSha, "error", "Manager token cannot review its own pull request");
     await applyPrTransition(options.ctx.octokit, options.ctx.repo, options.pr, "escalated", options.ctx.config.labels.prefix, false);
     return "blocked";
     }
   }
   if (options.verdict.verdict === "approve") {
-    await options.ctx.octokit.rest.repos.createCommitStatus({
-      ...options.ctx.repo,
-      sha: options.headSha,
-      state: "success",
-      context: "os-manager/approved",
-      description: "Approved by os-manager review pipeline"
-    });
+    await setApprovalStatus(options.ctx, options.headSha, "success", "Approved by os-manager review pipeline");
     await applyPrTransition(options.ctx.octokit, options.ctx.repo, options.pr, "approved", options.ctx.config.labels.prefix, false);
   } else {
-    await options.ctx.octokit.rest.repos.createCommitStatus({
-      ...options.ctx.repo,
-      sha: options.headSha,
-      state: "failure",
-      context: "os-manager/approved",
-      description: "Changes requested by os-manager review pipeline"
-    });
+    await setApprovalStatus(options.ctx, options.headSha, "failure", "Changes requested by os-manager review pipeline");
     await applyPrTransition(options.ctx.octokit, options.ctx.repo, options.pr, "changes-requested", options.ctx.config.labels.prefix, false);
   }
   return "submitted";
@@ -249,150 +240,179 @@ export async function reviewPr(options: { repo: string; pr: number; config?: str
     return;
   }
   const linkedIssue = issueNumberFromPrBody(pull.data.body);
-  const existingReviews = await ctx.octokit.paginate(ctx.octokit.rest.pulls.listReviews, {
-    ...ctx.repo,
-    pull_number: options.pr,
-    per_page: 100
-  });
-  const replay = latestReviewMarkerForHead(
-    existingReviews.map((review) => review.body),
-    pull.data.head.sha
-  );
-  if (replay) {
-    await repairReviewEffects({
-      ctx,
-      pr: options.pr,
-      headSha: pull.data.head.sha,
-      verdict: replay.verdict,
-      linkedIssue,
-      mergeTitle: pull.data.title
-    });
-    return;
-  }
-  if (!(await ensureDailyBudget(ctx, `pr:${options.pr}:review`, options.pr))) {
-    return;
-  }
-  if (linkedIssue) {
-    await applyIssueTransition(ctx.octokit, ctx.repo, linkedIssue, "in-review", ctx.config.labels.prefix, false);
-  }
-  if (countOsManagerReviewRounds(existingReviews.map((review) => review.body)) >= ctx.config.policies.max_review_rounds) {
-    await ctx.octokit.rest.issues.createComment({
+  let terminalStatusSet = false;
+  try {
+    await setApprovalStatus(ctx, pull.data.head.sha, "pending", "os-manager review in progress");
+    const existingReviews = await ctx.octokit.paginate(ctx.octokit.rest.pulls.listReviews, {
       ...ctx.repo,
-      issue_number: options.pr,
-      body: makeMarker(
-        "review",
-        { verdict: "escalated", headSha: pull.data.head.sha, v: 1 },
-        `os-manager review round limit reached. ${formatMentions(ctx.config.escalation.mention)}`
-      )
+      pull_number: options.pr,
+      per_page: 100
     });
-    await applyPrTransition(ctx.octokit, ctx.repo, options.pr, "escalated", ctx.config.labels.prefix, false);
-    if (linkedIssue) {
-      await applyIssueTransition(ctx.octokit, ctx.repo, linkedIssue, "escalated", ctx.config.labels.prefix, false);
-    }
-    return;
-  }
-  const planComment = linkedIssue ? await findMarkerComment(ctx.octokit, ctx.repo, linkedIssue, "plan") : undefined;
-  const specMarkdown = planComment?.body.replace(/<!--\s*osm:plan[\s\S]*?-->\s*/, "") ?? pull.data.body ?? "";
-  const worktree = await ensurePullRequestWorktree(ctx.repo, options.pr, pull.data.head.sha, { token: ctx.token });
-  const diff = await gitOutput(worktree, ["diff", `${pull.data.base.sha}...${pull.data.head.sha}`]).catch(async () =>
-    gitOutput(worktree, ["diff", "HEAD~1...HEAD"])
-  );
-  const diffStat = await gitOutput(worktree, ["diff", "--stat", `${pull.data.base.sha}...${pull.data.head.sha}`]).catch(() => Promise.resolve(""));
-
-  let reviewerVerdict: ReviewVerdict | undefined;
-  let metaVerdict: MetaReviewVerdict | undefined;
-  let revisionGuidance: string | undefined;
-  for (let round = 0; round < ctx.config.policies.max_meta_rounds; round += 1) {
-    const reviewerSession = await runReviewerPassSession({
-      pullRequest: {
-        number: pull.data.number,
-        title: pull.data.title,
-        body: pull.data.body,
-        baseRef: pull.data.base.ref,
-        headRef: pull.data.head.ref,
+    const replay = latestReviewMarkerForHead(
+      existingReviews.map((review) => review.body),
+      pull.data.head.sha
+    );
+    if (replay) {
+      await repairReviewEffects({
+        ctx,
+        pr: options.pr,
         headSha: pull.data.head.sha,
-        author: pull.data.user?.login
-      },
-      specMarkdown,
-      diff,
-      revisionGuidance,
-      cwd: worktree,
-      modelRef: ctx.config.models.review,
-      config: ctx.config
-    });
-    await recordSessionSpend(ctx, reviewerSession.usage, options.dryRun);
-    reviewerVerdict = reviewerSession.verdict;
-
-    if (!(await ensureDailyBudget(ctx, `pr:${options.pr}:meta-review`, options.pr))) {
+        verdict: replay.verdict,
+        linkedIssue,
+        mergeTitle: pull.data.title
+      });
+      terminalStatusSet = true;
       return;
     }
-    const metaSession = await runMetaReviewPassSession({
-      pullRequest: {
-        number: pull.data.number,
-        title: pull.data.title,
-        body: pull.data.body,
-        baseRef: pull.data.base.ref,
-        headRef: pull.data.head.ref,
-        headSha: pull.data.head.sha,
-        author: pull.data.user?.login
-      },
-      specMarkdown,
-      diffStatAndHunks: `${diffStat}\n\n${diff}`,
-      reviewerVerdict,
-      cwd: worktree,
-      modelRef: ctx.config.models.meta_review,
-      config: ctx.config
-    });
-    await recordSessionSpend(ctx, metaSession.usage, options.dryRun);
-    metaVerdict = metaSession.verdict;
-    if (metaVerdict.decision !== "revise") {
-      break;
+    await applyPrTransition(ctx.octokit, ctx.repo, options.pr, "awaiting-review", ctx.config.labels.prefix, false);
+    if (!(await ensureDailyBudget(ctx, `pr:${options.pr}:review`, options.pr))) {
+      await setApprovalStatus(ctx, pull.data.head.sha, "pending", "Daily os-manager budget exhausted; retrying later");
+      return;
     }
-    revisionGuidance = metaVerdict.revisionGuidance ?? metaVerdict.commentary;
-  }
+    if (linkedIssue) {
+      await applyIssueTransition(ctx.octokit, ctx.repo, linkedIssue, "in-review", ctx.config.labels.prefix, false);
+    }
+    if (countOsManagerReviewRounds(existingReviews.map((review) => review.body)) >= ctx.config.policies.max_review_rounds) {
+      await ctx.octokit.rest.issues.createComment({
+        ...ctx.repo,
+        issue_number: options.pr,
+        body: makeMarker(
+          "review",
+          { verdict: "escalated", headSha: pull.data.head.sha, v: 1 },
+          `os-manager review round limit reached. ${formatMentions(ctx.config.escalation.mention)}`
+        )
+      });
+      await setApprovalStatus(ctx, pull.data.head.sha, "error", "os-manager review round limit reached");
+      terminalStatusSet = true;
+      await applyPrTransition(ctx.octokit, ctx.repo, options.pr, "escalated", ctx.config.labels.prefix, false);
+      if (linkedIssue) {
+        await applyIssueTransition(ctx.octokit, ctx.repo, linkedIssue, "escalated", ctx.config.labels.prefix, false);
+      }
+      return;
+    }
+    const planComment = linkedIssue ? await findMarkerComment(ctx.octokit, ctx.repo, linkedIssue, "plan") : undefined;
+    const specMarkdown = planComment?.body.replace(/<!--\s*osm:plan[\s\S]*?-->\s*/, "") ?? pull.data.body ?? "";
+    const worktree = await ensurePullRequestWorktree(ctx.repo, options.pr, pull.data.head.sha, { token: ctx.token });
+    const diff = await gitOutput(worktree, ["diff", `${pull.data.base.sha}...${pull.data.head.sha}`]).catch(async () =>
+      gitOutput(worktree, ["diff", "HEAD~1...HEAD"])
+    );
+    const diffStat = await gitOutput(worktree, ["diff", "--stat", `${pull.data.base.sha}...${pull.data.head.sha}`]).catch(() => Promise.resolve(""));
 
-  if (!reviewerVerdict || !metaVerdict) {
-    throw new Error("Review pipeline did not produce a verdict");
-  }
-  if (metaVerdict.decision === "revise") {
-    if (!options.dryRun) {
+    let reviewerVerdict: ReviewVerdict | undefined;
+    let metaVerdict: MetaReviewVerdict | undefined;
+    let revisionGuidance: string | undefined;
+    for (let round = 0; round < ctx.config.policies.max_meta_rounds; round += 1) {
+      const reviewerSession = await runReviewerPassSession({
+        pullRequest: {
+          number: pull.data.number,
+          title: pull.data.title,
+          body: pull.data.body,
+          baseRef: pull.data.base.ref,
+          headRef: pull.data.head.ref,
+          headSha: pull.data.head.sha,
+          author: pull.data.user?.login
+        },
+        specMarkdown,
+        diff,
+        revisionGuidance,
+        cwd: worktree,
+        modelRef: ctx.config.models.review,
+        config: ctx.config
+      });
+      await recordSessionSpend(ctx, reviewerSession.usage, options.dryRun);
+      reviewerVerdict = reviewerSession.verdict;
+
+      if (!(await ensureDailyBudget(ctx, `pr:${options.pr}:meta-review`, options.pr))) {
+        await setApprovalStatus(ctx, pull.data.head.sha, "pending", "Daily os-manager budget exhausted; retrying later");
+        return;
+      }
+      const metaSession = await runMetaReviewPassSession({
+        pullRequest: {
+          number: pull.data.number,
+          title: pull.data.title,
+          body: pull.data.body,
+          baseRef: pull.data.base.ref,
+          headRef: pull.data.head.ref,
+          headSha: pull.data.head.sha,
+          author: pull.data.user?.login
+        },
+        specMarkdown,
+        diffStatAndHunks: `${diffStat}\n\n${diff}`,
+        reviewerVerdict,
+        cwd: worktree,
+        modelRef: ctx.config.models.meta_review,
+        config: ctx.config
+      });
+      await recordSessionSpend(ctx, metaSession.usage, options.dryRun);
+      metaVerdict = metaSession.verdict;
+      if (metaVerdict.decision !== "revise") {
+        break;
+      }
+      revisionGuidance = metaVerdict.revisionGuidance ?? metaVerdict.commentary;
+    }
+
+    if (!reviewerVerdict || !metaVerdict) {
+      throw new Error("Review pipeline did not produce a verdict");
+    }
+    if (metaVerdict.decision === "revise") {
       await ctx.octokit.rest.issues.createComment({
         ...ctx.repo,
         issue_number: options.pr,
         body: makeMarker("meta-review", { decision: "revise", v: 1 }, `Meta-review could not converge.\n\n${metaVerdict.commentary}`)
       });
+      await setApprovalStatus(ctx, pull.data.head.sha, "failure", "Meta-review requested another reviewer pass");
+      terminalStatusSet = true;
       await applyPrTransition(ctx.octokit, ctx.repo, options.pr, "changes-requested", ctx.config.labels.prefix, false);
+      return;
     }
-    return;
-  }
 
-  const verdict = finalVerdict(reviewerVerdict, metaVerdict);
-  const submission = await submitReview({
-    ctx,
-    pr: options.pr,
-    verdict,
-    headSha: pull.data.head.sha,
-    reviewerModel: runnerLabel(ctx.config.models.review.provider, ctx.config.models.review.model),
-    managerModel: runnerLabel(ctx.config.models.meta_review.provider, ctx.config.models.meta_review.model),
-    dryRun: options.dryRun
-  });
-  if (submission === "blocked") {
-    if (linkedIssue) {
-      await applyIssueTransition(ctx.octokit, ctx.repo, linkedIssue, "escalated", ctx.config.labels.prefix, false);
-    }
-    return;
-  }
-
-  if (verdict.verdict === "approve" && ctx.config.merge.auto_merge_on_approve && !options.dryRun) {
-    await ctx.octokit.rest.pulls.merge({
-      ...ctx.repo,
-      pull_number: options.pr,
-      merge_method: ctx.config.merge.method,
-      commit_title: pull.data.title
+    const verdict = finalVerdict(reviewerVerdict, metaVerdict);
+    const submission = await submitReview({
+      ctx,
+      pr: options.pr,
+      verdict,
+      headSha: pull.data.head.sha,
+      reviewerModel: runnerLabel(ctx.config.models.review.provider, ctx.config.models.review.model),
+      managerModel: runnerLabel(ctx.config.models.meta_review.provider, ctx.config.models.meta_review.model),
+      dryRun: options.dryRun
     });
-    if (linkedIssue) {
-      await applyIssueTransition(ctx.octokit, ctx.repo, linkedIssue, "done", ctx.config.labels.prefix, false);
+    terminalStatusSet = true;
+    if (submission === "blocked") {
+      if (linkedIssue) {
+        await applyIssueTransition(ctx.octokit, ctx.repo, linkedIssue, "escalated", ctx.config.labels.prefix, false);
+      }
+      return;
     }
+
+    if (verdict.verdict === "approve" && ctx.config.merge.auto_merge_on_approve && !options.dryRun) {
+      await ctx.octokit.rest.pulls.merge({
+        ...ctx.repo,
+        pull_number: options.pr,
+        merge_method: ctx.config.merge.method,
+        commit_title: pull.data.title
+      });
+      if (linkedIssue) {
+        await applyIssueTransition(ctx.octokit, ctx.repo, linkedIssue, "done", ctx.config.labels.prefix, false);
+      }
+    }
+  } catch (error) {
+    if (!terminalStatusSet) {
+      await ctx.octokit.rest.issues.createComment({
+        ...ctx.repo,
+        issue_number: options.pr,
+        body: makeMarker(
+          "review",
+          { verdict: "escalated", headSha: pull.data.head.sha, reason: "review-error", v: 1 },
+          `os-manager review failed before it could report a final verdict. ${formatMentions(ctx.config.escalation.mention)}\n\n${errorMessage(error)}`
+        )
+      });
+      await setApprovalStatus(ctx, pull.data.head.sha, "error", "os-manager review failed");
+      await applyPrTransition(ctx.octokit, ctx.repo, options.pr, "escalated", ctx.config.labels.prefix, false);
+      if (linkedIssue) {
+        await applyIssueTransition(ctx.octokit, ctx.repo, linkedIssue, "escalated", ctx.config.labels.prefix, false);
+      }
+    }
+    throw error;
   }
 }
 
@@ -412,5 +432,6 @@ export const testOnly = {
   submitReview,
   isOwnPullRequestReviewError,
   isUnresolvableLineError,
-  unplacedCommentsMarkdown
+  unplacedCommentsMarkdown,
+  setApprovalStatus
 };
